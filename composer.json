@@ -1,0 +1,20 @@
+{
+    "name": "ovrflo/jit-hydrator",
+    "description": "A drop-in replacement for Doctrine ORM's default object hydrator capable of generating optimized hydration code for each query.",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Catalin Dan",
+            "email": "dancatalin18@gmail.com"
+        }
+    ],
+    "require": {
+        "doctrine/orm": "^2.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ovrflo\\JitHydrator\\": ""
+        }
+    }
+}
