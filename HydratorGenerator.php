@@ -114,6 +114,7 @@ class HydratorGenerator
 
         $aliasColumnMap = [];
         $joinedRelations = [];
+        $inverseJoinedRelations = [];
         $aliasMetaMap = [];
 
         foreach ($this->rsm->parentAliasMap as $alias => $parentAlias) {
@@ -121,6 +122,13 @@ class HydratorGenerator
                 $joinedRelations[$parentAlias] = [];
             }
             $joinedRelations[$parentAlias][$this->rsm->relationMap[$alias]] = $alias;
+            $association = $this->getClassMetadata($this->rsm->aliasMap[$parentAlias])->getAssociationMapping($this->rsm->relationMap[$alias]);
+            if (isset($association['inversedBy'])) {
+                if (!isset($inverseJoinedRelations[$alias])) {
+                    $inverseJoinedRelations[$alias] = [];
+                }
+                $inverseJoinedRelations[$alias][$association['inversedBy']] = $parentAlias;
+            }
         }
 
         foreach ($this->rsm->fieldMappings as $key => $field) {
@@ -248,14 +256,10 @@ class HydratorGenerator
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
                             $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
-                            if (isset($joinedRelations[$alias][$name])) {
-                                $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
-                                $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . var_export($mapping, true) . ');');
-                                $hydrateMethod->writeln('$classMetadata->reflFields[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
-                            } else {
-                                $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
-                                $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . var_export($mapping, true) . ');');
-                                $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
+                            $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
+                            $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . var_export($mapping, true) . ');');
+                            $hydrateMethod->writeln('$classMetadata->reflFields[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
+                            if (isset($inverseJoinedRelations[$alias][$name])) {
                             }
                             break;
                     }
@@ -292,7 +296,7 @@ class HydratorGenerator
                 ->writeln('$entity_' . $alias . ' = null;')
                 ->writeElseIf('!isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
                 ->call($hydrateMethods[$alias], ['data' => '$data'], [
-                    'inline' => !$this->debug,
+                    'inline' => false,
                     'assign' => '$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash]',
                 ])
                 ->writeln('$new_entity_' . $alias . ' = true;')
@@ -335,14 +339,15 @@ class HydratorGenerator
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
                             if (isset($joinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
-
                                 $rowHydrateMethod->writeIf('$new_entity_' . $joinedRelations[$alias][$name]);
+                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $joinedRelations[$alias][$name] . ');');
                                 $rowHydrateMethod->writeEndif();
-                            } else {
-                                $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, $this->metadata_' . strtolower($alias . '_' . $name) . ', new \\' . ArrayCollection::class . '()))->setOwner($result, ' . var_export($mapping, true) . ');');
-                                $hydrateMethod->writeln('$this->metadata_' . $alias . '->reflFields[' . var_export($name, true) . ']->setValue($entity_' . $alias . ', $collection_' . $alias . '_' . $name . ');');
+                            } elseif (isset($inverseJoinedRelations[$alias][$name])) {
+                                $rowHydrateMethod->writeIf('$new_entity_' . $inverseJoinedRelations[$alias][$name]);
+                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
+                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $inverseJoinedRelations[$alias][$name] . ');');
+                                $rowHydrateMethod->writeEndif();
                             }
                             break;
                     }
