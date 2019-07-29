@@ -21,3 +21,6 @@ The table below shows a comparison of the hydrators for a query that returned 1,
 While this is currently running in production on a relatively small app, I wouldn't dare calling it production-ready. I'm sure there are a few bugs to squash in there. In my limited testing it worked, significantly lowering response times and CPU usage.
 Less CPU time means happier users and also lower power bills. Sure, we don't tend to think about power bills, but if you're running a huge infrastructure that heavily uses Doctrine ORM, it might actually make a difference. If power usage isn't a concern, than at least consider having more CPU headroom for your codebase.
 I personally encourage any one that needs a faster hydrator to test it and maybe even send some issues and/or PRs 😊
+
+# Credits
+I would like to thank @ocramius for his insightful blog post on [Doctrine ORM Hydration](https://ocramius.github.io/blog/doctrine-orm-optimization-hydration/), which gave me the idea to implement this. At the end of his blog post he suggested that peformance may be improved by generating hydrator code.
