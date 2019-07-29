@@ -9,7 +9,6 @@ use Doctrine\DBAL\DBALException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Statement;
 use Doctrine\DBAL\Types\Type;
-use Doctrine\DBAL\Types\Types;
 use Doctrine\Instantiator\Instantiator;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\Mapping\ClassMetadata;
@@ -179,30 +178,30 @@ class HydratorGenerator
                 $exportedKey = var_export($column, true);
                 if (isset($this->flags[self::OPTIMIZE_TYPE_CONVERSION]) && $this->flags[self::OPTIMIZE_TYPE_CONVERSION]) {
                     switch ($classMetadata->fieldMappings[$field]['type']) {
-                        case Types::TEXT:
-                        case Types::STRING:
+                        case Type::TEXT:
+                        case Type::STRING:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $data[' . $exportedKey . '];');
                             break;
-                        case Types::BOOLEAN:
+                        case Type::BOOLEAN:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (bool) $data[' . $exportedKey . '];');
                             break;
-                        case Types::BIGINT:
+                        case Type::BIGINT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (string) $data[' . $exportedKey . '];');
                             break;
-                        case Types::INTEGER:
-                        case Types::SMALLINT:
+                        case Type::INTEGER:
+                        case Type::SMALLINT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (int) $data[' . $exportedKey . '];');
                             break;
-                        case Types::DECIMAL:
-                        case Types::FLOAT:
+                        case Type::DECIMAL:
+                        case Type::FLOAT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (float) $data[' . $exportedKey . '];');
                             break;
-                        case Types::SIMPLE_ARRAY:
+                        case Type::SIMPLE_ARRAY:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? [] : (is_resource($data[' . $exportedKey . ']) ? explode(\',\', stream_get_contents($value)) : explode(\',\', $data[' . $exportedKey . ']));');
                             break;
-                        case Types::DATETIME_MUTABLE:
-                        case Types::DATETIME_IMMUTABLE:
-                            $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
+                        case Type::DATETIME:
+                        case Type::DATETIME_IMMUTABLE:
+                            $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Type::DATETIME ? \DateTime::class : \DateTimeImmutable::class;
                             $hydrateMethod->writeln('$value = $data[' . $exportedKey . '];');
                             $hydrateMethod->writeln('$value = (null === $value || $value instanceof \\DateTimeInterface) ? $value : \\' . $dateTimeClass . '::createFromFormat(' . var_export($this->entityManager->getConnection()->getDatabasePlatform()->getDateTimeFormatString(), true) . ', $value);');
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: \\date_create($data[' . $exportedKey . ']);');
