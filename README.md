@@ -17,6 +17,40 @@ The table below shows a comparison of the hydrators for a query that returned 1,
 | array         | 7.77 | 8.66 | 18.73 | 119.54 | 1137.93 | 11265.48 | 118089.68 |
 | **jit**       | 3.07 | 3.42 | 6.12  | 33.05  | 287.47  | 2686.87  | 29322.57  |
 
+# Installation
+
+### 1. Install package via composer
+```bash
+composer require ovrflo/jit-hydrator
+```
+
+### 2. a. if using Symfony >=4.0
+```yaml
+# config/packages/doctrine.yaml, under doctrine.orm key, add
+#doctrine:
+#    orm:
+        hydrators:
+            jit: Ovrflo\JitHydrator\JitObjectHydrator
+```
+
+### 2. b. if using Doctrine ORM without a framework:
+```php
+$entityManager->getConfiguration()->addCustomHydrationMode('jit', JitObjectHydrator::class);
+```
+
+### 3. Use it for a specific query
+```php
+        $query = $queryBuilder
+            ->getQuery()
+            ->setHint(Query::HINT_INCLUDE_META_COLUMNS, true)
+            ->getResult('jit')
+        ;
+```
+
+### Step 3 explained
+After you registered it, in order to use it you need 2 things. The most important one is `getResult('jit')` which tells Doctrine to use That hydrator.
+The second thing is `->setHint(Query::HINT_INCLUDE_META_COLUMNS, true)`. That's needed because otherwise Doctrine doesn't pass relation metadata to the Hydrator and it won't be able to work without it. Currently, only Doctrine's own ObjectHydrator receives this info without that Query Hint.
+
 # Status
 While this is currently running in production on a relatively small app, I wouldn't dare calling it production-ready. I'm sure there are a few bugs to squash in there. In my limited testing it worked, significantly lowering response times and CPU usage.
 Less CPU time means happier users and also lower power bills. Sure, we don't tend to think about power bills, but if you're running a huge infrastructure that heavily uses Doctrine ORM, it might actually make a difference. If power usage isn't a concern, than at least consider having more CPU headroom for your codebase.
