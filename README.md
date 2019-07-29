@@ -23,4 +23,4 @@ Less CPU time means happier users and also lower power bills. Sure, we don't ten
 I personally encourage any one that needs a faster hydrator to test it and maybe even send some issues and/or PRs 😊
 
 # Credits
-I would like to thank @ocramius for his insightful blog post on [Doctrine ORM Hydration](https://ocramius.github.io/blog/doctrine-orm-optimization-hydration/), which gave me the idea to implement this. At the end of his blog post he suggested that peformance may be improved by generating hydrator code.
+I would like to thank @ocramius for his insightful blog post on [Doctrine ORM Hydration](https://ocramius.github.io/blog/doctrine-orm-optimization-hydration/), which gave me the idea to implement this. At the end of his blog post he suggested that performance may be improved by generating hydrator code.
