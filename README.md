@@ -35,7 +35,7 @@ composer require ovrflo/jit-hydrator
 
 ### 2. b. if using Doctrine ORM without a framework:
 ```php
-$entityManager->getConfiguration()->addCustomHydrationMode('jit', JitObjectHydrator::class);
+$entityManager->getConfiguration()->addCustomHydrationMode('jit', \Ovrflo\JitHydrator\JitObjectHydrator::class);
 ```
 
 ### 3. Use it for a specific query
