@@ -238,6 +238,8 @@ class HydratorGenerator
                                     $hydrateMethod
                                         ->writeIf('isset($this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash])')
                                         ->writeln('$proxy_' . $alias . '_' . $name . ' = $this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash];')
+                                        ->writeElseIf('$proxy_' . $alias . '_' . $name . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . var_export($targetEntityClass, true) . ')')
+                                        ->writeln('$this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash] = $proxy_' . $alias . '_' . $name . ';')
                                         ->writeElse()
                                     ;
                                     $hydrateMethod->writeln('$reference = [')->indent();
