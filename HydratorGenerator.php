@@ -295,6 +295,9 @@ class HydratorGenerator
                 ->writeln('$new_entity_' . $alias . ' = false;')
                 ->writeIf(implode(' === null && ', $idHash) . ' === null ')
                 ->writeln('$entity_' . $alias . ' = null;')
+                ->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')')
+                ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash] = $uow_entity_' . $alias . ';')
+                ->writeln('$new_entity_' . $alias . ' = true;')
                 ->writeElseIf('!isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
                 ->call($hydrateMethods[$alias], ['data' => '$data'], [
                     'inline' => false,
