@@ -14,6 +14,7 @@ use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Proxy\Proxy;
+use Doctrine\ORM\Proxy\ProxyFactory;
 use Doctrine\ORM\Query\ResultSetMapping;
 use Doctrine\ORM\UnitOfWork;
 
@@ -22,8 +23,6 @@ use Doctrine\ORM\UnitOfWork;
  */
 class HydratorGenerator
 {
-    public const OPTIMIZE_TYPE_CONVERSION = 1;
-
     private $classWriter;
     /** @var ResultSetMapping */
     private $rsm;
@@ -44,17 +43,19 @@ class HydratorGenerator
      */
     private $debug;
 
-    public function __construct(string $className, string $namespace, ResultSetMapping $rsm, $stmt, array $hints = [], EntityManager $entityManager, bool $debug = false)
+    public function __construct(string $className, string $namespace, ResultSetMapping $rsm, $stmt, array $hints = [], EntityManager $entityManager, bool $debug = false, array $flags = [])
     {
         $this->rsm           = $rsm;
         $this->stmt          = $stmt;
         $this->hints         = $hints;
         $this->entityManager = $entityManager;
-        $this->flags = [
-            self::OPTIMIZE_TYPE_CONVERSION => true,
-        ];
+        $this->flags = array_replace([
+            JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION => true,
+            JitObjectHydrator::JIT_FLAG_STRICT_TYPES => true,
+            JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT => true,
+        ], $flags);
 
-        $this->classWriter = new ClassWriter($className, $namespace);
+        $this->classWriter = new ClassWriter($className, $namespace, $this->flags[JitObjectHydrator::JIT_FLAG_STRICT_TYPES], $this->flags[JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT]);
         $this->debug = $debug;
     }
 
@@ -74,7 +75,9 @@ class HydratorGenerator
             ->addProperty('databasePlatform', 'private', null, '\\' . AbstractPlatform::class)
             ->addProperty('unitOfWork', 'private', null, '\\' . UnitOfWork::class)
             ->addProperty('instantiator', 'private', null, '\\' . Instantiator::class)
+            ->addProperty('proxyFactory', 'private', null, '\\' . ProxyFactory::class)
             ->addProperty('identityMap', 'private', '[]', 'array')
+            ->addProperty('typeMap', 'private', '[]', 'array', false, false, 'array of ' . Type::class)
         ;
 
         $classMetadataConstructorMap = [];
@@ -85,6 +88,7 @@ class HydratorGenerator
         $constructor->writeln('$this->databasePlatform = $entityManager->getConnection()->getDatabasePlatform();');
         $constructor->writeln('$this->unitOfWork = $entityManager->getUnitOfWork();');
         $constructor->writeln('$this->instantiator = new \\' . Instantiator::class . '();');
+        $constructor->writeln('$this->proxyFactory = $entityManager->getProxyFactory();');
         $constructor->writeln('$reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
         $constructor->writeln("foreach (['identityMap'] as \$propertyName) {");
         $constructor->indent();
@@ -98,6 +102,7 @@ class HydratorGenerator
         $hydrateMethods = [];
         $classMetadata = [];
         $selectedEntities = [];
+        $globalInitializedTypes = [];
         foreach ($this->rsm->aliasMap as $alias => $entityClass) {
             if (!isset($selectedEntities[$entityClass])) {
                 $selectedEntities[$entityClass] = true;
@@ -173,11 +178,27 @@ class HydratorGenerator
             }
 
             $hydrateMethod->writeln('$entityData = [];');
+            if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
+                $initializedTypes = [];
+                foreach ($fields as $field => $column) {
+                    $type = $classMetadata->fieldMappings[$field]['type'];
+                    if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Type::TEXT, Type::STRING, TYPE::BOOLEAN, Type::BIGINT, Type::INTEGER, Type::SMALLINT, Type::SMALLINT, Type::DECIMAL, Type::FLOAT, Type::SIMPLE_ARRAY, Type::DATETIME, Type::DATETIME_IMMUTABLE])) {
+                        $globalInitializedTypes[$type] = true;
+                        $constructor->writeln('$this->typeMap[' . var_export($type, true) . '] = Type::getType(' . var_export($type, true) . ');');
+                    }
+                    if (!isset($initializedTypes[$type]) && !in_array($type, [Type::TEXT, Type::STRING, TYPE::BOOLEAN, Type::BIGINT, Type::INTEGER, Type::SMALLINT, Type::SMALLINT, Type::DECIMAL, Type::FLOAT, Type::SIMPLE_ARRAY, Type::DATETIME, Type::DATETIME_IMMUTABLE])) {
+                        $initializedTypes[$type] = true;
+                        $hydrateMethod->writeln('$type_' . $type . ' = $this->typeMap[' . var_export($type, true) . '];');
+                    }
+                }
+            }
+
             foreach ($fields as $field => $column) {
                 $hydrateMethod->writeln('// hydrate ' . $alias . '.' . $field);
                 $exportedKey = var_export($column, true);
-                if (isset($this->flags[self::OPTIMIZE_TYPE_CONVERSION]) && $this->flags[self::OPTIMIZE_TYPE_CONVERSION]) {
-                    switch ($classMetadata->fieldMappings[$field]['type']) {
+                if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
+                    $type = $classMetadata->fieldMappings[$field]['type'];
+                    switch ($type) {
                         case Type::TEXT:
                         case Type::STRING:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $data[' . $exportedKey . '];');
@@ -204,10 +225,14 @@ class HydratorGenerator
                             $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Type::DATETIME ? \DateTime::class : \DateTimeImmutable::class;
                             $hydrateMethod->writeln('$value = $data[' . $exportedKey . '];');
                             $hydrateMethod->writeln('$value = (null === $value || $value instanceof \\DateTimeInterface) ? $value : \\' . $dateTimeClass . '::createFromFormat(' . var_export($this->entityManager->getConnection()->getDatabasePlatform()->getDateTimeFormatString(), true) . ', $value);');
-                            $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: \\date_create($data[' . $exportedKey . ']);');
+                            $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: (null !== $data[' . $exportedKey . '] ? \\date_create($data[' . $exportedKey . ']) : null);');
                             break;
                         default:
-                            $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                            if (isset($initializedTypes[$type])) {
+                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $type_' . $type . '->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                            } else {
+                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                            }
                     }
                 } else {
                     $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
@@ -247,7 +272,8 @@ class HydratorGenerator
                                         $hydrateMethod->writeln(var_export($identifierColumn, true) . ' => Type::getType(' . var_export($this->rsm->typeMappings[$column], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform),');
                                     }
                                     $hydrateMethod->outdent()->writeln('];');
-                                    $hydrateMethod->writeln('$proxy_' . $alias . '_' . $name . ' = $this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash] =  $this->entityManager->getProxyFactory()->getProxy(' . var_export($targetEntityClass, true) . ', $reference);');
+                                    $hydrateMethod->writeln('$proxy_' . $alias . '_' . $name . ' = $this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash] =  $this->proxyFactory->getProxy(' . var_export($targetEntityClass, true) . ', $reference);');
+                                    $hydrateMethod->writeln('$this->unitOfWork->registerManaged($proxy_' . $alias . '_' . $name . ', $reference, []);');
                                     $hydrateMethod->writeEndif();
                                     $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
                                     $hydrateMethod->writeEndif();
@@ -362,7 +388,7 @@ class HydratorGenerator
 
         foreach ($classMetadataConstructorMap as $class => $names) {
             $metadataPropertyName = $this->getMetadataPropertyName($class, true);
-            $this->classWriter->addProperty($metadataPropertyName, 'private', null, '\\' . ClassMetadata::class, false, 'for ' . $class);
+            $this->classWriter->addProperty($metadataPropertyName, 'private', null, '\\' . ClassMetadata::class, false, false, 'for ' . $class);
             $constructor->writeln('$this->' . $metadataPropertyName . ' = $this->entityManager->getClassMetadata(' . var_export($class, true) . ');');
         }
 

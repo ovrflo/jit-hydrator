@@ -10,6 +10,11 @@ use Doctrine\ORM\Internal\Hydration\AbstractHydrator;
  */
 class JitObjectHydrator extends AbstractHydrator
 {
+    public const HINT_JIT_FLAGS = 'jit_flags';
+    public const JIT_FLAG_OPTIMIZE_TYPE_CONVERSION = 1;
+    public const JIT_FLAG_STRICT_TYPES = 2;
+    public const JIT_FLAG_PROPERTY_TYPE_HINT = 3;
+
     /**
      * @var string|null
      */
@@ -46,7 +51,7 @@ class JitObjectHydrator extends AbstractHydrator
 
         $cacheFilename = $this->cacheDir . '/' . $className . '.php';
         if ($this->debug || !$this->cacheDir || !file_exists($cacheFilename)) {
-            $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->_rsm, $this->_stmt, $this->_hints, $this->_em);
+            $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->_rsm, $this->_stmt, $this->_hints, $this->_em, false, $this->_hints[self::HINT_JIT_FLAGS] ?? []);
             $classString = $hydratorGenerator->dump($this->cacheDir === null);
             if ($this->cacheDir) {
                 file_put_contents($cacheFilename, $classString);
