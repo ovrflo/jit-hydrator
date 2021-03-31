@@ -2,6 +2,8 @@
 
 namespace Ovrflo\JitHydrator;
 
+use Doctrine\DBAL\ForwardCompatibility\Result;
+use Doctrine\DBAL\Statement;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Internal\Hydration\AbstractHydrator;
 
@@ -36,7 +38,13 @@ class JitObjectHydrator extends AbstractHydrator
 
     protected function hydrateAllData()
     {
-        $serialized = serialize([get_object_vars($this->_rsm), $this->_hints, $this->_stmt->queryString ?? null]);
+        $queryString = null;
+        if ($this->_stmt instanceof Result) {
+            $queryString = $this->_stmt->getIterator()->queryString ?? null;
+        } elseif ($this->_stmt instanceof Statement) {
+            $queryString = $this->_stmt->queryString ?? null;
+        }
+        $serialized = serialize([get_object_vars($this->_rsm), $this->_hints, $queryString]);
         $cacheKey = md5($serialized);
         $className = 'Hydrator_' . $cacheKey;
         $namespace = '__CG__\\Doctrine\\JitHydrator';

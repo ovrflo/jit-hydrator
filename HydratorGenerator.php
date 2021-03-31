@@ -3,6 +3,7 @@
 namespace Ovrflo\JitHydrator;
 
 use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\DBAL\ForwardCompatibility\Result;
 use Doctrine\Persistence\NotifyPropertyChanged;
 use Doctrine\Persistence\ObjectManagerAware;
 use Doctrine\DBAL\DBALException;
@@ -26,7 +27,7 @@ class HydratorGenerator
     private $classWriter;
     /** @var ResultSetMapping */
     private $rsm;
-    /** @var Statement */
+    /** @var Statement|Result */
     private $stmt;
     /** @var array */
     private $hints;
@@ -83,7 +84,13 @@ class HydratorGenerator
         $classMetadataConstructorMap = [];
 
         $constructor = $this->classWriter->createMethod('__construct', ['entityManager', '\\' . EntityManager::class])->setVisibility('public');
-        $constructor->writeln('// Statement: ' . $this->stmt->queryString ?? '');
+        $queryString = null;
+        if ($this->stmt instanceof Result) {
+            $queryString = $this->stmt->getIterator()->queryString ?? null;
+        } elseif ($this->stmt instanceof Statement) {
+            $queryString = $this->stmt->queryString ?? null;
+        }
+        $constructor->writeln('// Statement: ' . ($queryString ?? 'unknown'));
         $constructor->writeln('$this->entityManager = $entityManager;');
         $constructor->writeln('$this->databasePlatform = $entityManager->getConnection()->getDatabasePlatform();');
         $constructor->writeln('$this->unitOfWork = $entityManager->getUnitOfWork();');
