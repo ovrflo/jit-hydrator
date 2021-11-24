@@ -4,6 +4,7 @@ namespace Ovrflo\JitHydrator;
 
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\DBAL\ForwardCompatibility\Result;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\Persistence\NotifyPropertyChanged;
 use Doctrine\Persistence\ObjectManagerAware;
 use Doctrine\DBAL\DBALException;
@@ -51,10 +52,10 @@ class HydratorGenerator
         $this->hints         = $hints;
         $this->entityManager = $entityManager;
         $this->flags = array_replace([
-            JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION => true,
-            JitObjectHydrator::JIT_FLAG_STRICT_TYPES => true,
-            JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT => true,
-        ], $flags);
+                                         JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION => true,
+                                         JitObjectHydrator::JIT_FLAG_STRICT_TYPES => true,
+                                         JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT => true,
+                                     ], $flags);
 
         $this->classWriter = new ClassWriter($className, $namespace, $this->flags[JitObjectHydrator::JIT_FLAG_STRICT_TYPES], $this->flags[JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT]);
         $this->debug = $debug;
@@ -70,6 +71,7 @@ class HydratorGenerator
         $rootEntities = array_diff(array_keys($this->rsm->aliasMap), array_keys($this->rsm->parentAliasMap));
 
         $this->classWriter
+            ->addUse(Types::class)
             ->addUse(Type::class)
             ->addUse(Proxy::class)
             ->addProperty('entityManager', 'private', null, '\\' . EntityManager::class)
@@ -78,7 +80,7 @@ class HydratorGenerator
             ->addProperty('instantiator', 'private', null, '\\' . Instantiator::class)
             ->addProperty('proxyFactory', 'private', null, '\\' . ProxyFactory::class)
             ->addProperty('identityMap', 'private', '[]', 'array')
-            ->addProperty('typeMap', 'private', '[]', 'array', false, false, 'array of ' . Type::class)
+            ->addProperty('typeMap', 'private', '[]', 'array', false, false, 'array of ' . Types::class)
         ;
 
         $classMetadataConstructorMap = [];
@@ -189,11 +191,11 @@ class HydratorGenerator
                 $initializedTypes = [];
                 foreach ($fields as $field => $column) {
                     $type = $classMetadata->fieldMappings[$field]['type'];
-                    if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Type::TEXT, Type::STRING, TYPE::BOOLEAN, Type::BIGINT, Type::INTEGER, Type::SMALLINT, Type::SMALLINT, Type::DECIMAL, Type::FLOAT, Type::SIMPLE_ARRAY, Type::DATETIME, Type::DATETIME_IMMUTABLE])) {
+                    if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $globalInitializedTypes[$type] = true;
                         $constructor->writeln('$this->typeMap[' . var_export($type, true) . '] = Type::getType(' . var_export($type, true) . ');');
                     }
-                    if (!isset($initializedTypes[$type]) && !in_array($type, [Type::TEXT, Type::STRING, TYPE::BOOLEAN, Type::BIGINT, Type::INTEGER, Type::SMALLINT, Type::SMALLINT, Type::DECIMAL, Type::FLOAT, Type::SIMPLE_ARRAY, Type::DATETIME, Type::DATETIME_IMMUTABLE])) {
+                    if (!isset($initializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $initializedTypes[$type] = true;
                         $hydrateMethod->writeln('$type_' . $type . ' = $this->typeMap[' . var_export($type, true) . '];');
                     }
@@ -206,30 +208,30 @@ class HydratorGenerator
                 if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
                     $type = $classMetadata->fieldMappings[$field]['type'];
                     switch ($type) {
-                        case Type::TEXT:
-                        case Type::STRING:
+                        case Types::TEXT:
+                        case Types::STRING:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $data[' . $exportedKey . '];');
                             break;
-                        case Type::BOOLEAN:
+                        case Types::BOOLEAN:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (bool) $data[' . $exportedKey . '];');
                             break;
-                        case Type::BIGINT:
+                        case Types::BIGINT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (string) $data[' . $exportedKey . '];');
                             break;
-                        case Type::INTEGER:
-                        case Type::SMALLINT:
+                        case Types::INTEGER:
+                        case Types::SMALLINT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (int) $data[' . $exportedKey . '];');
                             break;
-                        case Type::DECIMAL:
-                        case Type::FLOAT:
+                        case Types::DECIMAL:
+                        case Types::FLOAT:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (float) $data[' . $exportedKey . '];');
                             break;
-                        case Type::SIMPLE_ARRAY:
+                        case Types::SIMPLE_ARRAY:
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? [] : (is_resource($data[' . $exportedKey . ']) ? explode(\',\', stream_get_contents($value)) : explode(\',\', $data[' . $exportedKey . ']));');
                             break;
-                        case Type::DATETIME:
-                        case Type::DATETIME_IMMUTABLE:
-                            $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Type::DATETIME ? \DateTime::class : \DateTimeImmutable::class;
+                        case Types::DATETIME_MUTABLE:
+                        case Types::DATETIME_IMMUTABLE:
+                            $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
                             $hydrateMethod->writeln('$value = $data[' . $exportedKey . '];');
                             $hydrateMethod->writeln('$value = (null === $value || $value instanceof \\DateTimeInterface) ? $value : \\' . $dateTimeClass . '::createFromFormat(' . var_export($this->entityManager->getConnection()->getDatabasePlatform()->getDateTimeFormatString(), true) . ', $value);');
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: (null !== $data[' . $exportedKey . '] ? \\date_create($data[' . $exportedKey . ']) : null);');
