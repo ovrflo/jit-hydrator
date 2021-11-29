@@ -15,10 +15,10 @@ use Doctrine\Instantiator\Instantiator;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\PersistentCollection;
-use Doctrine\ORM\Proxy\Proxy;
 use Doctrine\ORM\Proxy\ProxyFactory;
 use Doctrine\ORM\Query\ResultSetMapping;
 use Doctrine\ORM\UnitOfWork;
+use Doctrine\Persistence\Proxy;
 
 /**
  * @author Catalin Dan <dancatalin18@gmail.com>
@@ -191,13 +191,14 @@ class HydratorGenerator
                 $initializedTypes = [];
                 foreach ($fields as $field => $column) {
                     $type = $classMetadata->fieldMappings[$field]['type'];
+                    $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $globalInitializedTypes[$type] = true;
                         $constructor->writeln('$this->typeMap[' . var_export($type, true) . '] = Type::getType(' . var_export($type, true) . ');');
                     }
                     if (!isset($initializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $initializedTypes[$type] = true;
-                        $hydrateMethod->writeln('$type_' . $type . ' = $this->typeMap[' . var_export($type, true) . '];');
+                        $hydrateMethod->writeln('$type_' . $typeVariableName . ' = $this->typeMap[' . var_export($type, true) . '];');
                     }
                 }
             }
@@ -207,6 +208,7 @@ class HydratorGenerator
                 $exportedKey = var_export($column, true);
                 if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
                     $type = $classMetadata->fieldMappings[$field]['type'];
+                    $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     switch ($type) {
                         case Types::TEXT:
                         case Types::STRING:
@@ -238,7 +240,7 @@ class HydratorGenerator
                             break;
                         default:
                             if (isset($initializedTypes[$type])) {
-                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $type_' . $type . '->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $type_' . $typeVariableName . '->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             } else {
                                 $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             }
@@ -330,7 +332,19 @@ class HydratorGenerator
                 ->writeln('$new_entity_' . $alias . ' = false;')
                 ->writeIf(implode(' === null && ', $idHash) . ' === null ')
                 ->writeln('$entity_' . $alias . ' = null;')
+                ->writeElseIf('isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
+                ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash];')
+                ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__')
+                ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                ->writeln('$entity_' . $alias . '->__isInitialized__ = true;')
+                ->writeln('$entity_' . $alias . '->__initializer__ = $entity_' . $alias .'->__cloner__ = null;')
+                ->writeEndif()
                 ->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')')
+                ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized__')
+                ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
+                ->writeln('$uow_entity_' . $alias . '->__isInitialized__ = true;')
+                ->writeln('$uow_entity_' . $alias . '->__initializer__ = $uow_entity_' . $alias .'->__cloner__ = null;')
+                ->writeEndif()
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash] = $uow_entity_' . $alias . ';')
                 ->writeln('$new_entity_' . $alias . ' = true;')
                 ->writeElseIf('!isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
@@ -340,12 +354,6 @@ class HydratorGenerator
                 ])
                 ->writeln('$new_entity_' . $alias . ' = true;')
                 ->writeElse()
-                ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash];')
-                ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__')
-                ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
-                ->writeln('$entity_' . $alias . '->__isInitialized__ = true;')
-                ->writeln('$entity_' . $alias . '->__initializer__ = $entity_' . $alias .'->__cloner__ = null;')
-                ->writeEndif()
                 ->writeEndif()
             ;
 
