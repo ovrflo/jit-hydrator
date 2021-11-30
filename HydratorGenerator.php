@@ -179,6 +179,7 @@ class HydratorGenerator
             }
             $hydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
             $hydrateMethod->writeln(sprintf('$result = $proxy ?? $this->instantiator->instantiate(' . var_export($entityClass, true) . ');'));
+            $hydrateMethod->writeln('$oid = spl_object_id($result);');
             if ($classMetadata->reflClass->implementsInterface(ObjectManagerAware::class)) {
                 $hydrateMethod->writeln(sprintf('$result->injectObjectManager($this->entityManager, $classMetadata);'));
             }
@@ -295,7 +296,12 @@ class HydratorGenerator
                         case ClassMetadata::MANY_TO_MANY:
                             $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
                             $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
+                            if (!isset($joinedRelations[$alias][$name])) {
+                                $hydrateMethod->writeln('$collection_' . $name . '->setInitialized(false);');
+                                $hydrateMethod->writeln('$collection_' . $name . '->setDirty(false);');
+                            }
                             $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . var_export($mapping, true) . ');');
+                            $hydrateMethod->writeln('$this->unitOfWork->setOriginalEntityProperty($oid, ' . var_export($name, true) . ', $collection_' . $name . ');');
                             $hydrateMethod->writeln('$classMetadata->reflFields[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
                             if (isset($inverseJoinedRelations[$alias][$name])) {
                             }
@@ -386,12 +392,12 @@ class HydratorGenerator
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
                             if (isset($joinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeIf('$new_entity_' . $joinedRelations[$alias][$name]);
+                                $rowHydrateMethod->writeIf('$entity_' . $joinedRelations[$alias][$name]);
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $joinedRelations[$alias][$name] . ');');
                                 $rowHydrateMethod->writeEndif();
                             } elseif (isset($inverseJoinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeIf('$new_entity_' . $inverseJoinedRelations[$alias][$name]);
+                                $rowHydrateMethod->writeIf('$entity_' . $inverseJoinedRelations[$alias][$name]);
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $inverseJoinedRelations[$alias][$name] . ');');
                                 $rowHydrateMethod->writeEndif();
