@@ -68,6 +68,7 @@ class HydratorGenerator
 
     public function dump(bool $forEval = false)
     {
+        $objectManagerAwareExists = class_exists(ObjectManagerAware::class);
         $rootEntities = array_diff(array_keys($this->rsm->aliasMap), array_keys($this->rsm->parentAliasMap));
 
         $this->classWriter
@@ -180,7 +181,7 @@ class HydratorGenerator
             $hydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
             $hydrateMethod->writeln(sprintf('$result = $proxy ?? $this->instantiator->instantiate(' . var_export($entityClass, true) . ');'));
             $hydrateMethod->writeln('$oid = spl_object_id($result);');
-            if ($classMetadata->reflClass->implementsInterface(ObjectManagerAware::class)) {
+            if ($objectManagerAwareExists && $classMetadata->reflClass->implementsInterface(ObjectManagerAware::class)) {
                 $hydrateMethod->writeln(sprintf('$result->injectObjectManager($this->entityManager, $classMetadata);'));
             }
             if ($classMetadata->reflClass->implementsInterface(NotifyPropertyChanged::class)) {
