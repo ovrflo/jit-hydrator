@@ -363,12 +363,6 @@ class HydratorGenerator
 
             if ($isLazyGhostProxy) {
                 $rowHydrateMethod
-                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()')
-                    ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
-                    ->writeln('$entity_' . $alias . '->__setInitialized(true);')
-                    ->writeEndif()
-                ;
-                $rowHydrateMethod
                     ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized()')
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
                     ->writeln('$uow_entity_' . $alias . '->__setInitialized(true);')
