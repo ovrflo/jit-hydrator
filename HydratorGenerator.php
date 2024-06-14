@@ -52,10 +52,10 @@ class HydratorGenerator
         $this->hints         = $hints;
         $this->entityManager = $entityManager;
         $this->flags = array_replace([
-                                         JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION => true,
-                                         JitObjectHydrator::JIT_FLAG_STRICT_TYPES => true,
-                                         JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT => true,
-                                     ], $flags);
+            JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION => true,
+            JitObjectHydrator::JIT_FLAG_STRICT_TYPES => true,
+            JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT => true,
+        ], $flags);
 
         $this->classWriter = new ClassWriter($className, $namespace, $this->flags[JitObjectHydrator::JIT_FLAG_STRICT_TYPES], $this->flags[JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT]);
         $this->debug = $debug;
@@ -70,6 +70,7 @@ class HydratorGenerator
     {
         $objectManagerAwareExists = class_exists(ObjectManagerAware::class);
         $rootEntities = array_diff(array_keys($this->rsm->aliasMap), array_keys($this->rsm->parentAliasMap));
+        $isLazyGhostProxy = $this->entityManager->getConfiguration()->isLazyGhostObjectEnabled();
 
         $this->classWriter
             ->addUse(Types::class)
@@ -341,17 +342,48 @@ class HydratorGenerator
                 ->writeln('$entity_' . $alias . ' = null;')
                 ->writeElseIf('isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash];')
-                ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__')
-                ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
-                ->writeln('$entity_' . $alias . '->__isInitialized__ = true;')
-                ->writeln('$entity_' . $alias . '->__initializer__ = $entity_' . $alias .'->__cloner__ = null;')
-                ->writeEndif()
-                ->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')')
-                ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized__')
-                ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
-                ->writeln('$uow_entity_' . $alias . '->__isInitialized__ = true;')
-                ->writeln('$uow_entity_' . $alias . '->__initializer__ = $uow_entity_' . $alias .'->__cloner__ = null;')
-                ->writeEndif()
+            ;
+            if ($isLazyGhostProxy) {
+                $rowHydrateMethod
+                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                    ->writeln('$entity_' . $alias . '->__setInitialized(true);')
+                    ->writeEndif()
+                ;
+            } else {
+                $rowHydrateMethod
+                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                    ->writeln('$entity_' . $alias . '->__isInitialized__ = true;')
+                    ->writeln('$entity_' . $alias . '->__initializer__ = $entity_' . $alias .'->__cloner__ = null;')
+                    ->writeEndif()
+                ;
+            }
+            $rowHydrateMethod->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')');
+
+            if ($isLazyGhostProxy) {
+                $rowHydrateMethod
+                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                    ->writeln('$entity_' . $alias . '->__setInitialized(true);')
+                    ->writeEndif()
+                ;
+                $rowHydrateMethod
+                    ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized()')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
+                    ->writeln('$uow_entity_' . $alias . '->__setInitialized(true);')
+                    ->writeEndif()
+                ;
+            } else {
+                $rowHydrateMethod
+                    ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized__')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
+                    ->writeln('$uow_entity_' . $alias . '->__isInitialized__ = true;')
+                    ->writeln('$uow_entity_' . $alias . '->__initializer__ = $uow_entity_' . $alias .'->__cloner__ = null;')
+                    ->writeEndif()
+                ;
+            }
+            $rowHydrateMethod
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash] = $uow_entity_' . $alias . ';')
                 ->writeln('$new_entity_' . $alias . ' = true;')
                 ->writeElseIf('!isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
