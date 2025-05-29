@@ -45,7 +45,7 @@ class HydratorGenerator
      */
     private $debug;
 
-    public function __construct(string $className, string $namespace, ResultSetMapping $rsm, $stmt, array $hints = [], EntityManager $entityManager, bool $debug = false, array $flags = [])
+    public function __construct(string $className, string $namespace, ResultSetMapping $rsm, $stmt, array $hints, EntityManager $entityManager, bool $debug = false, array $flags = [])
     {
         $this->rsm           = $rsm;
         $this->stmt          = $stmt;

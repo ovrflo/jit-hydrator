@@ -56,7 +56,7 @@ class ClassWriter
         return $forEval ? $this->generateClassForEval($body) : $this->generateClass($body);
     }
 
-    public function addProperty(string $name, string $visibility = 'private', string $defaultValue = null, string $type = null, ?bool $nullable = null, bool $isStatic = false, string $description = null)
+    public function addProperty(string $name, string $visibility = 'private', ?string $defaultValue = null, ?string $type = null, ?bool $nullable = null, bool $isStatic = false, ?string $description = null)
     {
         $this->properties[$name] = [
             'name' => $name,
