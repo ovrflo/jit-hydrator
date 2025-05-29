@@ -170,7 +170,7 @@ class HydratorGenerator
             $hydrateMethod = $this->classWriter->createMethod('newEntity_' . $alias);
             $hydrateMethod
                 ->addArgument('data', 'array')
-                ->addArgument('proxy', 'Proxy', 'null')
+                ->addArgument('proxy', '?Proxy', 'null')
                 ->setReturnType('\\' . $entityClass)
                 ->addThrows('\\' . DBALException::class)
             ;

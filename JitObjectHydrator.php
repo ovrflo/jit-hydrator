@@ -74,14 +74,14 @@ class JitObjectHydrator extends AbstractHydrator
         $fqcn = $namespace . '\\' . $className;
         $instance = new $fqcn($this->_em);
         $result = [];
-        while ($row = $this->_stmt->fetch(\PDO::FETCH_ASSOC)) {
+        while ($row = $this->_stmt->fetchAssociative()) {
             $instance->hydrate($row, $result);
         }
 
         return $result;
     }
 
-    protected function hydrateRowData(array $data, array &$result)
+    protected function hydrateRowData(array $data, array &$result): void
     {
         throw new \Exception(__METHOD__ . ' not implemented.');
     }
