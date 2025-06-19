@@ -2,10 +2,13 @@
 
 namespace Ovrflo\JitHydrator;
 
-use Doctrine\DBAL\ForwardCompatibility\Result;
+use Doctrine\DBAL\Platforms\AbstractPlatform;
+use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Statement;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Internal\Hydration\AbstractHydrator;
+use Doctrine\ORM\Query\ResultSetMapping;
+use Doctrine\ORM\UnitOfWork;
 
 /**
  * @author Catalin Dan <dancatalin18@gmail.com>
@@ -26,6 +29,20 @@ class JitObjectHydrator extends AbstractHydrator
      */
     private $debug;
 
+    protected $_rsm = null;
+    protected $_em = null;
+    protected $_platform = null;
+    protected $_uow = null;
+    protected $_stmt = null;
+    protected $_hints = null;
+
+    protected ?ResultSetMapping $rsm;
+    protected EntityManagerInterface $em;
+    protected AbstractPlatform $platform;
+    protected UnitOfWork $uow;
+    protected ?Result $stmt;
+    protected array $hints;
+
     public function __construct(EntityManagerInterface $em, bool $debug = false)
     {
         parent::__construct($em);
@@ -34,17 +51,30 @@ class JitObjectHydrator extends AbstractHydrator
             $this->cacheDir = $proxyDir . '/../JitHydrator';
         }
         $this->debug = $debug;
+        if ($this->_em) {
+            $this->em = $this->_em;
+            $this->platform = $this->_platform;
+            $this->uow = $this->_uow;
+        }
     }
 
-    protected function hydrateAllData()
+    protected function hydrateAllData(): mixed
     {
-        $queryString = null;
-        if ($this->_stmt instanceof Result) {
-            $queryString = $this->_stmt->getIterator()->queryString ?? null;
-        } elseif ($this->_stmt instanceof Statement) {
-            $queryString = $this->_stmt->queryString ?? null;
+        if ($this->_rsm) {
+            $this->stmt = $this->_stmt;
+            $this->rsm = $this->_rsm;
+            $this->hints = $this->_hints;
         }
-        $serialized = serialize([get_object_vars($this->_rsm), $this->_hints, $queryString]);
+
+        $queryString = null;
+        if (method_exists($this->stmt, 'getIterator')) {
+            if ($this->stmt instanceof Result) {
+                $queryString = $this->stmt->getIterator()->queryString ?? null;
+            } elseif ($this->stmt instanceof Statement) {
+                $queryString = $this->stmt->queryString ?? null;
+            }
+        }
+        $serialized = serialize([get_object_vars($this->rsm), $this->hints, $queryString]);
         $cacheKey = md5($serialized);
         $className = 'Hydrator_' . $cacheKey;
         $namespace = '__CG__\\Doctrine\\JitHydrator';
@@ -59,7 +89,7 @@ class JitObjectHydrator extends AbstractHydrator
 
         $cacheFilename = $this->cacheDir . '/' . $className . '.php';
         if ($this->debug || !$this->cacheDir || !file_exists($cacheFilename)) {
-            $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->_rsm, $this->_stmt, $this->_hints, $this->_em, false, $this->_hints[self::HINT_JIT_FLAGS] ?? []);
+            $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->rsm, $this->stmt, $this->hints, $this->em, false, $this->hints[self::HINT_JIT_FLAGS] ?? []);
             $classString = $hydratorGenerator->dump($this->cacheDir === null);
             if ($this->cacheDir) {
                 file_put_contents($cacheFilename, $classString);
@@ -72,9 +102,9 @@ class JitObjectHydrator extends AbstractHydrator
         }
 
         $fqcn = $namespace . '\\' . $className;
-        $instance = new $fqcn($this->_em);
+        $instance = new $fqcn($this->em);
         $result = [];
-        while ($row = $this->_stmt->fetchAssociative()) {
+        while ($row = $this->stmt->fetchAssociative()) {
             $instance->hydrate($row, $result);
         }
 

@@ -71,11 +71,13 @@ class HydratorGenerator
         $objectManagerAwareExists = class_exists(ObjectManagerAware::class);
         $rootEntities = array_diff(array_keys($this->rsm->aliasMap), array_keys($this->rsm->parentAliasMap));
         $isLazyGhostProxy = $this->entityManager->getConfiguration()->isLazyGhostObjectEnabled();
+        $hasPropertyAccessor = property_exists(ClassMetadata::class, 'propertyAccessors');
+        $isNativeProxy = method_exists($this->entityManager->getConfiguration(), 'isNativeLazyObjectsEnabled') && $this->entityManager->getConfiguration()->isNativeLazyObjectsEnabled();
+        $propertyAccessors = $hasPropertyAccessor ? 'propertyAccessors' : 'reflFields';
 
         $this->classWriter
             ->addUse(Types::class)
             ->addUse(Type::class)
-            ->addUse(Proxy::class)
             ->addProperty('entityManager', 'private', null, '\\' . EntityManager::class)
             ->addProperty('databasePlatform', 'private', null, '\\' . AbstractPlatform::class)
             ->addProperty('unitOfWork', 'private', null, '\\' . UnitOfWork::class)
@@ -84,6 +86,10 @@ class HydratorGenerator
             ->addProperty('identityMap', 'private', '[]', 'array')
             ->addProperty('typeMap', 'private', '[]', 'array', false, false, 'array of ' . Types::class)
         ;
+
+        if (!$isNativeProxy) {
+            $this->addUse(Proxy::class);
+        }
 
         $classMetadataConstructorMap = [];
 
@@ -170,7 +176,7 @@ class HydratorGenerator
             $hydrateMethod = $this->classWriter->createMethod('newEntity_' . $alias);
             $hydrateMethod
                 ->addArgument('data', 'array')
-                ->addArgument('proxy', '?Proxy', 'null')
+                ->addArgument('proxy', $isNativeProxy ? '?object' : '?Proxy', 'null')
                 ->setReturnType('\\' . $entityClass)
                 ->addThrows('\\' . DBALException::class)
             ;
@@ -251,7 +257,7 @@ class HydratorGenerator
                 } else {
                     $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                 }
-                $hydrateMethod->writeln(sprintf('$classMetadata->reflFields[' . var_export($field, true) . ']->setValue($result, $value);'));
+                $hydrateMethod->writeln(sprintf('$classMetadata->'.$propertyAccessors.'[' . var_export($field, true) . ']->setValue($result, $value);'));
                 $hydrateMethod->writeln();
             }
 
@@ -289,7 +295,7 @@ class HydratorGenerator
                                     $hydrateMethod->writeln('$proxy_' . $alias . '_' . $name . ' = $this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash] =  $this->proxyFactory->getProxy(' . var_export($targetEntityClass, true) . ', $reference);');
                                     $hydrateMethod->writeln('$this->unitOfWork->registerManaged($proxy_' . $alias . '_' . $name . ', $reference, []);');
                                     $hydrateMethod->writeEndif();
-                                    $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
+                                    $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
                                     $hydrateMethod->writeEndif();
                                 }
                             }
@@ -302,9 +308,9 @@ class HydratorGenerator
                                 $hydrateMethod->writeln('$collection_' . $name . '->setInitialized(false);');
                                 $hydrateMethod->writeln('$collection_' . $name . '->setDirty(false);');
                             }
-                            $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . var_export($mapping, true) . ');');
+                            $hydrateMethod->writeln('$collection_' . $name . '->setOwner($result, ' . $this->getMetadataPropertyName($entityClass) . '->getAssociationMapping(' . var_export($name, true) . '));');
                             $hydrateMethod->writeln('$this->unitOfWork->setOriginalEntityProperty($oid, ' . var_export($name, true) . ', $collection_' . $name . ');');
-                            $hydrateMethod->writeln('$classMetadata->reflFields[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
+                            $hydrateMethod->writeln('$classMetadata->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, $collection_' . $name . ');');
                             if (isset($inverseJoinedRelations[$alias][$name])) {
                             }
                             break;
@@ -343,7 +349,14 @@ class HydratorGenerator
                 ->writeElseIf('isset($this->identityMap[' . $entityClassEscaped . '][$idHash])')
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash];')
             ;
-            if ($isLazyGhostProxy) {
+            if ($isNativeProxy) {
+                $rowHydrateMethod
+                    ->writeIf($this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($entity_' . $alias . ')')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                    ->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($entity_' . $alias . ');')
+                    ->writeEndif()
+                ;
+            } elseif ($isLazyGhostProxy) {
                 $rowHydrateMethod
                     ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()')
                     ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
@@ -361,7 +374,14 @@ class HydratorGenerator
             }
             $rowHydrateMethod->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')');
 
-            if ($isLazyGhostProxy) {
+            if ($isNativeProxy) {
+                $rowHydrateMethod
+                    ->writeIf($this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($uow_entity_' . $alias . ')')
+                    ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
+                    ->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($uow_entity_' . $alias . ');')
+                    ->writeEndif()
+                ;
+            } else if ($isLazyGhostProxy) {
                 $rowHydrateMethod
                     ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized()')
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
@@ -412,7 +432,7 @@ class HydratorGenerator
                         case ClassMetadata::ONE_TO_ONE:
                             if (isset($joinedRelations[$alias][$name])) {
                                 $rowHydrateMethod->writeIf('$new_entity_' . $alias . ' && $entity_' . $joinedRelations[$alias][$name]);
-                                $rowHydrateMethod->writeln(sprintf($this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->setValue($entity_' . $alias . ', $entity_' . $joinedRelations[$alias][$name] . ');'));
+                                $rowHydrateMethod->writeln(sprintf($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($entity_' . $alias . ', $entity_' . $joinedRelations[$alias][$name] . ');'));
                                 $rowHydrateMethod->writeEndif();
                             }
                             break;
@@ -420,12 +440,12 @@ class HydratorGenerator
                         case ClassMetadata::MANY_TO_MANY:
                             if (isset($joinedRelations[$alias][$name])) {
                                 $rowHydrateMethod->writeIf('$entity_' . $joinedRelations[$alias][$name]);
-                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
+                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $joinedRelations[$alias][$name] . ');');
                                 $rowHydrateMethod->writeEndif();
                             } elseif (isset($inverseJoinedRelations[$alias][$name])) {
                                 $rowHydrateMethod->writeIf('$entity_' . $inverseJoinedRelations[$alias][$name]);
-                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->reflFields[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
+                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $inverseJoinedRelations[$alias][$name] . ');');
                                 $rowHydrateMethod->writeEndif();
                             }
