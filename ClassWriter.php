@@ -23,6 +23,8 @@ class ClassWriter
     private $properties = [];
     /** @var Method[] */
     private $methods = [];
+    /** @var string[] */
+    private $implementedInterfaces = [];
 
     public function __construct(string $className = 'CustomInlinedHydrator', string $namespace = 'App\\Doctrine\\Hydrator', bool $strictTypes = false, bool $propertyTypeHint = false)
     {
@@ -30,6 +32,16 @@ class ClassWriter
         $this->namespace = $namespace;
         $this->strictTypes = $strictTypes;
         $this->propertyTypeHint = $propertyTypeHint;
+    }
+
+    public function implements(string $interface): self
+    {
+        if (!isset($this->implementedInterfaces[$interface])) {
+            $basename = basename(str_replace('\\', '/', $interface));
+            $this->uses[$interface] = null;
+            $this->implementedInterfaces[$interface] = $basename;
+        }
+        return $this;
     }
 
     public function dump(bool $forEval = false)
@@ -90,19 +102,24 @@ class ClassWriter
 %strictTypes%
 namespace %namespace%;%uses%
 
-class %name%
+class %name%%implementedInterfaces%
 {
 %body%
 }
 
 EOT;
+        $implementedInterfaces = count($this->implementedInterfaces) ? ' implements ' . implode(', ', $this->implementedInterfaces) : '';
         $uses = [];
         foreach ($this->uses as $class => $alias) {
             $uses[] = sprintf('use %s%s;', $class, $alias !== null ? ' as ' . $alias : '');
         }
         $strictTypes = $this->strictTypes ? "declare(strict_types=1);\n" : '';
 
-        return str_replace(['%strictTypes%', '%body%', '%name%', '%namespace%', '%uses%'], [$strictTypes, $body, $this->className, $this->namespace, count($this->uses) ? "\n\n" . implode("\n", $uses) : ''], $template);
+        return str_replace(
+            ['%strictTypes%', '%body%', '%name%', '%namespace%', '%uses%', '%implementedInterfaces%'],
+            [$strictTypes, $body, $this->className, $this->namespace, count($this->uses) ? "\n\n" . implode("\n", $uses) : '', $implementedInterfaces],
+            $template
+        );
     }
 
     private function generateClassForEval(string $body)
@@ -113,17 +130,22 @@ EOT;
 namespace %namespace% {
 %uses%
 
-class %name%
+class %name%%implementedInterfaces%
 {
 %body%
 }
 }
 
 EOT;
+        $implementedInterfaces = count($this->implementedInterfaces) ? ' implements ' . implode(', ', $this->implementedInterfaces) : '';
         $uses = [];
         foreach ($this->uses as $class => $alias) {
             $uses[] = sprintf('use %s%s;', $class, $alias !== null ? ' as ' . $alias : '');
         }
-        return str_replace(['%body%', '%name%', '%namespace%', '%uses%'], [$body, $this->className, $this->namespace, count($this->uses) ? "\n\n" . implode("\n", $uses) : ''], $template);
+        return str_replace(
+            ['%body%', '%name%', '%namespace%', '%uses%', '%implementedInterfaces%'],
+            [$body, $this->className, $this->namespace, count($this->uses) ? "\n\n" . implode("\n", $uses) : '', $implementedInterfaces],
+            $template
+        );
     }
 }

@@ -5,6 +5,9 @@ namespace Ovrflo\JitHydrator;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\DBAL\ForwardCompatibility\Result;
 use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Event\ListenersInvoker;
+use Doctrine\ORM\Internal\HydrationCompleteHandler;
+use Doctrine\ORM\Query;
 use Doctrine\Persistence\NotifyPropertyChanged;
 use Doctrine\Persistence\ObjectManagerAware;
 use Doctrine\DBAL\DBALException;
@@ -58,6 +61,7 @@ class HydratorGenerator
         ], $flags);
 
         $this->classWriter = new ClassWriter($className, $namespace, $this->flags[JitObjectHydrator::JIT_FLAG_STRICT_TYPES], $this->flags[JitObjectHydrator::JIT_FLAG_PROPERTY_TYPE_HINT]);
+        $this->classWriter->implements(GeneratedObjectHydrator::class);
         $this->debug = $debug;
     }
 
@@ -76,7 +80,6 @@ class HydratorGenerator
         $propertyAccessors = $hasPropertyAccessor ? 'propertyAccessors' : 'reflFields';
 
         $this->classWriter
-            ->addUse(Types::class)
             ->addUse(Type::class)
             ->addProperty('entityManager', 'private', null, '\\' . EntityManager::class)
             ->addProperty('databasePlatform', 'private', null, '\\' . AbstractPlatform::class)
@@ -85,7 +88,12 @@ class HydratorGenerator
             ->addProperty('proxyFactory', 'private', null, '\\' . ProxyFactory::class)
             ->addProperty('identityMap', 'private', '[]', 'array')
             ->addProperty('typeMap', 'private', '[]', 'array', false, false, 'array of ' . Types::class)
+            ->addProperty('reflectionUow', 'private', null, '\\ReflectionClass', false, false)
         ;
+
+        if ((true === ($this->hints[Query::HINT_REFRESH] ?? null)) || isset($this->hints[Query::HINT_REFRESH_ENTITY])) {
+            $this->classWriter->addProperty('refreshedEntities', 'private', '[]', 'array', false, false, 'array of object');
+        }
 
         if (!$isNativeProxy) {
             $this->addUse(Proxy::class);
@@ -100,18 +108,36 @@ class HydratorGenerator
         } elseif ($this->stmt instanceof Statement) {
             $queryString = $this->stmt->queryString ?? null;
         }
+        if (class_exists(HydrationCompleteHandler::class)) {
+            $this->classWriter
+                ->addUse(HydrationCompleteHandler::class)
+                ->addUse(ListenersInvoker::class)
+                ->addProperty('listenersInvoker', 'private', null, '\\' . ListenersInvoker::class)
+                ->addProperty('hydrationCompleteHandler', 'private', null, '\\' . HydrationCompleteHandler::class)
+            ;
+            $constructor
+                ->writeln('$this->listenersInvoker = new ListenersInvoker($entityManager);')
+                ->writeln('$this->hydrationCompleteHandler = new HydrationCompleteHandler($this->listenersInvoker, $entityManager);')
+            ;
+        }
         $constructor->writeln('// Statement: ' . ($queryString ?? 'unknown'));
         $constructor->writeln('$this->entityManager = $entityManager;');
         $constructor->writeln('$this->databasePlatform = $entityManager->getConnection()->getDatabasePlatform();');
         $constructor->writeln('$this->unitOfWork = $entityManager->getUnitOfWork();');
         $constructor->writeln('$this->instantiator = new \\' . Instantiator::class . '();');
         $constructor->writeln('$this->proxyFactory = $entityManager->getProxyFactory();');
-        $constructor->writeln('$reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
-        $constructor->writeln("foreach (['identityMap'] as \$propertyName) {");
+        $constructor->writeln('$this->reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
+        $constructor->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {");
         $constructor->indent();
-        $constructor->writeln('$reflectionUow->getProperty($propertyName)->setAccessible(true);');
+        $constructor->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(true);');
         $constructor->outdent();
         $constructor->writeln('}');
+
+        $cleanupMethod = $this->classWriter->createMethod('cleanup')->setVisibility('public');
+        $cleanupMethod->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {")->indent()
+            ->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(false);')
+            ->outdent()->writeln('}')
+        ;
 
         $rowHydrateMethod = $this->classWriter->createMethod('hydrate', ['data', 'array'], ['result', null, null, true])->setVisibility('public');
 
@@ -269,8 +295,16 @@ class HydratorGenerator
                     switch ($mapping['type']) {
                         case ClassMetadata::ONE_TO_ONE:
                         case ClassMetadata::MANY_TO_ONE:
-                            $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
                             if (!isset($joinedRelations[$alias][$name])) {
+                                $fetchMode = isset($this->hints['fetchMode'][$classMetadata->name][$name])
+                                    ? $this->hints['fetchMode'][$classMetadata->name][$name]
+                                    : $mapping['fetch']
+                                ;
+                                $isEagerLoading = $fetchMode === ClassMetadata::FETCH_EAGER;
+                                $isDeferredEagerLoading = $isEagerLoading && isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD]) && true === $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD];
+                                $shouldDeferEagerLoading = $isDeferredEagerLoading && !$targetClassMetadata->isIdentifierComposite;
+
+                                $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
                                 $metaColumnsIncluded = count(array_diff(array_keys($mapping['sourceToTargetKeyColumns']), array_keys($aliasMetaMap[$alias]))) === 0;
                                 $column = $aliasMetaMap[$alias][array_keys($mapping['sourceToTargetKeyColumns'])[0]];
                                 if ($metaColumnsIncluded) {
@@ -296,6 +330,29 @@ class HydratorGenerator
                                     $hydrateMethod->writeln('$this->unitOfWork->registerManaged($proxy_' . $alias . '_' . $name . ', $reference, []);');
                                     $hydrateMethod->writeEndif();
                                     $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
+                                    if ($shouldDeferEagerLoading) {
+                                        $checkProxyCondition = null;
+                                        switch (true) {
+                                            case $isNativeProxy:
+                                                $checkProxyCondition = $this->getMetadataPropertyName($targetEntityClass).'->reflClass->isUninitializedLazyObject($proxy_' . $alias . '_' . $name . ')';
+                                                break;
+                                            case $isLazyGhostProxy:
+                                                $checkProxyCondition = '($entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized())';
+                                                break;
+                                            default:
+                                                $checkProxyCondition = '($entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__)';
+                                                break;
+                                        }
+                                        $hydrateMethod->writeln('$singleIdentifier = Type::getType(' . var_export($this->rsm->typeMappings[$column], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                                        $hydrateMethod
+                                            ->writeIf($checkProxyCondition)
+                                            ->writeln('$eagerLoadingEntitiesProperty = $this->reflectionUow->getProperty(\'eagerLoadingEntities\');')
+                                            ->writeln('$eagerLoadingEntities = $eagerLoadingEntitiesProperty->getValue($this->unitOfWork);')
+                                            ->writeln('$eagerLoadingEntities['.var_export($targetEntityClass, true).'][(string) $singleIdentifier] = $singleIdentifier;')
+                                            ->writeln('$eagerLoadingEntitiesProperty->setValue($this->unitOfWork, $eagerLoadingEntities);')
+                                            ->writeEndif()
+                                        ;
+                                    }
                                     $hydrateMethod->writeEndif();
                                 }
                             }
@@ -324,6 +381,12 @@ class HydratorGenerator
                 $idHash[] = var_export($identifierFieldName, true) . ' => $data[' . var_export($fields[$identifierFieldName], true) . ']';
             }
             $hydrateMethod->writeln('$this->unitOfWork->registerManaged($result, [' . implode(" . ' ' . ", $idHash) . '], $entityData);');
+            if ($this->hints[Query::HINT_READ_ONLY] ?? false) {
+                $hydrateMethod->writeln('$this->unitOfWork->markReadOnly($result);');
+            }
+            if (class_exists(HydrationCompleteHandler::class)) {
+                $hydrateMethod->writeln('$this->hydrationCompleteHandler->deferPostLoadInvoking($classMetadata, $result);');
+            }
 
             $hydrateMethods[$alias] = $hydrateMethod;
         }
@@ -335,6 +398,7 @@ class HydratorGenerator
 
         foreach ($aliasColumnMap as $alias => $fields) {
             $entityClass = $this->rsm->aliasMap[$alias];
+            $shouldRefresh = ($this->hints[Query::HINT_REFRESH] ?? false) || (($this->hints[Query::HINT_REFRESH_ENTITY] ?? null) === $entityClass);
             $entityClassEscaped = var_export($entityClass, true);
             $classMetadata = $this->getClassMetadata($entityClass);
             $idHash = [];
@@ -351,51 +415,100 @@ class HydratorGenerator
             ;
             if ($isNativeProxy) {
                 $rowHydrateMethod
-                    ->writeIf($this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($entity_' . $alias . ')')
+                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($entity_' . $alias . '))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
-                    ->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($entity_' . $alias . ');')
-                    ->writeEndif()
                 ;
+
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $rowHydrateMethod->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($entity_' . $alias . ');');
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')] = true;');
+                }
+
+                $rowHydrateMethod->writeEndif();
             } elseif ($isLazyGhostProxy) {
                 $rowHydrateMethod
-                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()')
+                    ->writeIf('($isUninitialized = ($entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized()))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
-                    ->writeln('$entity_' . $alias . '->__setInitialized(true);')
-                    ->writeEndif()
                 ;
+
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $shouldRefresh->writeln('$entity_' . $alias . '->__setInitialized(true);');
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')] = true;');
+                }
+                $rowHydrateMethod->writeEndif();
             } else {
                 $rowHydrateMethod
-                    ->writeIf('$entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__')
+                    ->writeIf('($isUninitialized = ($entity_' . $alias . ' instanceof Proxy && !$entity_' . $alias . '->__isInitialized__))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
+                ;
+
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $rowHydrateMethod
                     ->writeln('$entity_' . $alias . '->__isInitialized__ = true;')
                     ->writeln('$entity_' . $alias . '->__initializer__ = $entity_' . $alias .'->__cloner__ = null;')
-                    ->writeEndif()
                 ;
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')] = true;');
+                }
+
+                $rowHydrateMethod->writeEndif();
             }
             $rowHydrateMethod->writeElseIf('$uow_entity_' . $alias . ' = $this->unitOfWork->tryGetByIdHash($idHash, ' . $entityClassEscaped . ')');
 
             if ($isNativeProxy) {
                 $rowHydrateMethod
-                    ->writeIf($this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($uow_entity_' . $alias . ')')
+                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($uow_entity_' . $alias . '))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
-                    ->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($uow_entity_' . $alias . ');')
-                    ->writeEndif()
                 ;
+
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $rowHydrateMethod->writeln($this->getMetadataPropertyName($entityClass).'->reflClass->markLazyObjectAsInitialized($uow_entity_' . $alias . ');');
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')] = true;');
+                }
+
+                $rowHydrateMethod->writeEndif();
             } else if ($isLazyGhostProxy) {
                 $rowHydrateMethod
-                    ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized()')
+                    ->writeIf('($isUninitialized = ($uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized()))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
-                    ->writeln('$uow_entity_' . $alias . '->__setInitialized(true);')
-                    ->writeEndif()
                 ;
+
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $rowHydrateMethod->writeln('$uow_entity_' . $alias . '->__setInitialized(true);');
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')] = true;');
+                }
+
+                $rowHydrateMethod->writeEndif();
             } else {
                 $rowHydrateMethod
-                    ->writeIf('$uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized__')
+                    ->writeIf('($isUninitialized = ($uow_entity_' . $alias . ' instanceof Proxy && !$uow_entity_' . $alias . '->__isInitialized__))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
+                ;
+                $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
+                $rowHydrateMethod
                     ->writeln('$uow_entity_' . $alias . '->__isInitialized__ = true;')
                     ->writeln('$uow_entity_' . $alias . '->__initializer__ = $uow_entity_' . $alias .'->__cloner__ = null;')
-                    ->writeEndif()
                 ;
+                $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
+
+                if ($shouldRefresh) {
+                    $rowHydrateMethod->writeln('$this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')] = true;');
+                }
+                $rowHydrateMethod->writeEndif();
             }
             $rowHydrateMethod
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash] = $uow_entity_' . $alias . ';')

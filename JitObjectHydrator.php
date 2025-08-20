@@ -7,6 +7,7 @@ use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Statement;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Internal\Hydration\AbstractHydrator;
+use Doctrine\ORM\Query;
 use Doctrine\ORM\Query\ResultSetMapping;
 use Doctrine\ORM\UnitOfWork;
 
@@ -42,6 +43,7 @@ class JitObjectHydrator extends AbstractHydrator
     protected UnitOfWork $uow;
     protected ?Result $stmt;
     protected array $hints;
+    protected ?GeneratedObjectHydrator $generatedObjectHydrator = null;
 
     public function __construct(EntityManagerInterface $em, bool $debug = false)
     {
@@ -64,6 +66,10 @@ class JitObjectHydrator extends AbstractHydrator
             $this->stmt = $this->_stmt;
             $this->rsm = $this->_rsm;
             $this->hints = $this->_hints;
+        }
+
+        if (!isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD])) {
+            $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD] = true;
         }
 
         $queryString = null;
@@ -101,8 +107,10 @@ class JitObjectHydrator extends AbstractHydrator
             require_once $cacheFilename;
         }
 
+        /** @var class-string<GeneratedObjectHydrator> $fqcn */
         $fqcn = $namespace . '\\' . $className;
-        $instance = new $fqcn($this->em);
+        /** @var GeneratedObjectHydrator $instance */
+        $this->generatedObjectHydrator = $instance = new $fqcn($this->em);
         $result = [];
         while ($row = $this->stmt->fetchAssociative()) {
             $instance->hydrate($row, $result);
@@ -114,5 +122,26 @@ class JitObjectHydrator extends AbstractHydrator
     protected function hydrateRowData(array $data, array &$result): void
     {
         throw new \Exception(__METHOD__ . ' not implemented.');
+    }
+
+    protected function cleanup(): void
+    {
+        $eagerLoad = isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD]) && $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD] === true;
+
+        parent::cleanup();
+        $this->generatedObjectHydrator->cleanup();
+
+        $this->identifierMap            =
+        $this->initializedCollections   =
+        $this->uninitializedCollections =
+        $this->existingCollections      =
+        $this->resultPointers           = [];
+
+        if ($eagerLoad) {
+            $this->uow->triggerEagerLoads();
+        }
+
+        $this->uow->hydrationComplete();
+        $this->generatedObjectHydrator = null;
     }
 }
