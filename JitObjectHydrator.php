@@ -131,12 +131,6 @@ class JitObjectHydrator extends AbstractHydrator
         parent::cleanup();
         $this->generatedObjectHydrator->cleanup();
 
-        $this->identifierMap            =
-        $this->initializedCollections   =
-        $this->uninitializedCollections =
-        $this->existingCollections      =
-        $this->resultPointers           = [];
-
         if ($eagerLoad) {
             $this->uow->triggerEagerLoads();
         }
