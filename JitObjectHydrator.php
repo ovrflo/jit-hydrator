@@ -129,7 +129,9 @@ class JitObjectHydrator extends AbstractHydrator
         $eagerLoad = isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD]) && $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD] === true;
 
         parent::cleanup();
-        $this->generatedObjectHydrator->cleanup();
+        if ($this->generatedObjectHydrator) {
+            $this->generatedObjectHydrator->cleanup();
+        }
 
         if ($eagerLoad) {
             $this->uow->triggerEagerLoads();
