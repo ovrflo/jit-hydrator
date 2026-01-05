@@ -104,12 +104,6 @@ class JitObjectHydrator extends AbstractHydrator
                     file_put_contents($cacheFilename, $classString);
                     require_once $cacheFilename;
                 } else {
-                    if (PHP_SAPI === 'frankenphp') {
-                        $oldClassName = $className;
-                        $className = $oldClassName . '_'.bin2hex(random_bytes(4));
-                        $classString = str_replace($oldClassName, $className, $classString);
-                        $fqcn = $namespace . '\\' . $className;
-                    }
                     eval(substr($classString, 5));
                 }
             } else {
