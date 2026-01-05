@@ -93,22 +93,30 @@ class JitObjectHydrator extends AbstractHydrator
             }
         }
 
-        $cacheFilename = $this->cacheDir . '/' . $className . '.php';
-        if ($this->debug || !$this->cacheDir || !file_exists($cacheFilename)) {
-            $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->rsm, $this->stmt, $this->hints, $this->em, false, $this->hints[self::HINT_JIT_FLAGS] ?? []);
-            $classString = $hydratorGenerator->dump($this->cacheDir === null);
-            if ($this->cacheDir) {
-                file_put_contents($cacheFilename, $classString);
-                require_once $cacheFilename;
-            } else {
-                eval(substr($classString, 5));
-            }
-        } else {
-            require_once $cacheFilename;
-        }
-
         /** @var class-string<GeneratedObjectHydrator> $fqcn */
         $fqcn = $namespace . '\\' . $className;
+        if (!class_exists($fqcn, false)) {
+            $cacheFilename = $this->cacheDir . '/' . $className . '.php';
+            if ($this->debug || !$this->cacheDir || !file_exists($cacheFilename)) {
+                $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->rsm, $this->stmt, $this->hints, $this->em, false, $this->hints[self::HINT_JIT_FLAGS] ?? []);
+                $classString = $hydratorGenerator->dump($this->cacheDir === null);
+                if ($this->cacheDir) {
+                    file_put_contents($cacheFilename, $classString);
+                    require_once $cacheFilename;
+                } else {
+                    if (PHP_SAPI === 'frankenphp') {
+                        $oldClassName = $className;
+                        $className = $oldClassName . '_'.bin2hex(random_bytes(4));
+                        $classString = str_replace($oldClassName, $className, $classString);
+                        $fqcn = $namespace . '\\' . $className;
+                    }
+                    eval(substr($classString, 5));
+                }
+            } else {
+                require_once $cacheFilename;
+            }
+        }
+
         /** @var GeneratedObjectHydrator $instance */
         $this->generatedObjectHydrator = $instance = new $fqcn($this->em);
         $result = [];
