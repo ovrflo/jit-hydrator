@@ -129,15 +129,19 @@ class HydratorGenerator
         $constructor->writeln('$this->reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
         $constructor->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {");
         $constructor->indent();
-        $constructor->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(true);');
+        if (PHP_VERSION_ID < 80100) {
+            $constructor->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(true);');
+        }
         $constructor->outdent();
         $constructor->writeln('}');
 
         $cleanupMethod = $this->classWriter->createMethod('cleanup')->setVisibility('public');
-        $cleanupMethod->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {")->indent()
-            ->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(false);')
-            ->outdent()->writeln('}')
-        ;
+        if (PHP_VERSION_ID < 80100) {
+            $cleanupMethod->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {")->indent()
+                ->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(false);')
+                ->outdent()->writeln('}')
+            ;
+        }
 
         $rowHydrateMethod = $this->classWriter->createMethod('hydrate', ['data', 'array'], ['result', null, null, true])->setVisibility('public');
 
@@ -225,7 +229,7 @@ class HydratorGenerator
             if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
                 $initializedTypes = [];
                 foreach ($fields as $field => $column) {
-                    $type = $classMetadata->fieldMappings[$field]['type'];
+                    $type = $classMetadata->fieldMappings[$field]->type;
                     $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $globalInitializedTypes[$type] = true;
@@ -242,7 +246,7 @@ class HydratorGenerator
                 $hydrateMethod->writeln('// hydrate ' . $alias . '.' . $field);
                 $exportedKey = var_export($column, true);
                 if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
-                    $type = $classMetadata->fieldMappings[$field]['type'];
+                    $type = $classMetadata->fieldMappings[$field]->type;
                     $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     switch ($type) {
                         case Types::TEXT:
@@ -268,7 +272,7 @@ class HydratorGenerator
                             break;
                         case Types::DATETIME_MUTABLE:
                         case Types::DATETIME_IMMUTABLE:
-                            $dateTimeClass = $classMetadata->fieldMappings[$field]['type'] === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
+                            $dateTimeClass = $classMetadata->fieldMappings[$field]->type === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
                             $hydrateMethod->writeln('$value = $data[' . $exportedKey . '];');
                             $hydrateMethod->writeln('$value = (null === $value || $value instanceof \\DateTimeInterface) ? $value : \\' . $dateTimeClass . '::createFromFormat(' . var_export($this->entityManager->getConnection()->getDatabasePlatform()->getDateTimeFormatString(), true) . ', $value);');
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: (null !== $data[' . $exportedKey . '] ? \\date_create($data[' . $exportedKey . ']) : null);');
@@ -277,11 +281,11 @@ class HydratorGenerator
                             if (isset($initializedTypes[$type])) {
                                 $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $type_' . $typeVariableName . '->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             } else {
-                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]->type, true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             }
                     }
                 } else {
-                    $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]['type'], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                    $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]->type, true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                 }
                 $hydrateMethod->writeln(sprintf('$classMetadata->'.$propertyAccessors.'[' . var_export($field, true) . ']->setValue($result, $value);'));
                 $hydrateMethod->writeln();
@@ -289,27 +293,27 @@ class HydratorGenerator
 
             if (count($classMetadata->getAssociationMappings())) {
                 foreach ($classMetadata->getAssociationMappings() as $name => $mapping) {
-                    $targetEntityClass = $mapping['targetEntity'];
+                    $targetEntityClass = $mapping->targetEntity;
                     $targetClassMetadata = $this->getClassMetadata($targetEntityClass);
                     $classMetadataConstructorMap[$targetEntityClass][] = $alias . '_' . $name;
-                    switch ($mapping['type']) {
+                    switch ($mapping->type()) {
                         case ClassMetadata::ONE_TO_ONE:
                         case ClassMetadata::MANY_TO_ONE:
                             if (!isset($joinedRelations[$alias][$name])) {
                                 $fetchMode = isset($this->hints['fetchMode'][$classMetadata->name][$name])
                                     ? $this->hints['fetchMode'][$classMetadata->name][$name]
-                                    : $mapping['fetch']
+                                    : $mapping->fetch
                                 ;
                                 $isEagerLoading = $fetchMode === ClassMetadata::FETCH_EAGER;
                                 $isDeferredEagerLoading = $isEagerLoading && isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD]) && true === $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD];
                                 $shouldDeferEagerLoading = $isDeferredEagerLoading && !$targetClassMetadata->isIdentifierComposite;
 
-                                $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
-                                $metaColumnsIncluded = count(array_diff(array_keys($mapping['sourceToTargetKeyColumns']), array_keys($aliasMetaMap[$alias]))) === 0;
-                                $column = $aliasMetaMap[$alias][array_keys($mapping['sourceToTargetKeyColumns'])[0]];
+                                $hydrateMethod->writeln('// hydrate ' . ($mapping->type() === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
+                                $metaColumnsIncluded = count(array_diff(array_keys($mapping->sourceToTargetKeyColumns), array_keys($aliasMetaMap[$alias]))) === 0;
+                                $column = $aliasMetaMap[$alias][array_keys($mapping->sourceToTargetKeyColumns)[0]];
                                 if ($metaColumnsIncluded) {
                                     $ifColumns = [];
-                                    foreach (array_keys($mapping['sourceToTargetKeyColumns']) as $joinColumnName) {
+                                    foreach (array_keys($mapping->sourceToTargetKeyColumns) as $joinColumnName) {
                                         $ifColumns[] = '$data[' . var_export($aliasMetaMap[$alias][$joinColumnName], true) . ']';
                                     }
                                     $hydrateMethod->writeIf(implode(' !== null || ', $ifColumns) . ' !== null');
@@ -359,7 +363,7 @@ class HydratorGenerator
                             break;
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
-                            $hydrateMethod->writeln('// hydrate ' . ($mapping['type'] === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
+                            $hydrateMethod->writeln('// hydrate ' . ($mapping->type() === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
                             $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
                             if (!isset($joinedRelations[$alias][$name])) {
                                 $hydrateMethod->writeln('$collection_' . $name . '->setInitialized(false);');
@@ -538,9 +542,9 @@ class HydratorGenerator
                     ->writeIf('$entity_' . $alias . ' !== null')
                 ;
                 foreach ($classMetadata->getAssociationMappings() as $name => $mapping) {
-                    $targetEntityClass = $mapping['targetEntity'];
+                    $targetEntityClass = $mapping->targetEntity;
                     $targetClassMetadata = $this->getClassMetadata($targetEntityClass);
-                    switch ($mapping['type']) {
+                    switch ($mapping->type()) {
                         case ClassMetadata::MANY_TO_ONE:
                         case ClassMetadata::ONE_TO_ONE:
                             if (isset($joinedRelations[$alias][$name])) {
