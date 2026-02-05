@@ -96,7 +96,7 @@ class HydratorGenerator
         }
 
         if (!$isNativeProxy) {
-            $this->addUse(Proxy::class);
+            $this->classWriter->addUse(Proxy::class);
         }
 
         $classMetadataConstructorMap = [];
@@ -439,7 +439,7 @@ class HydratorGenerator
                 ;
 
                 $shouldRefresh ? $rowHydrateMethod->writeIf('$isUninitialized') : null;
-                $shouldRefresh->writeln('$entity_' . $alias . '->__setInitialized(true);');
+                $shouldRefresh ? $rowHydrateMethod->writeln('$entity_' . $alias . '->__setInitialized(true);') : null;
                 $shouldRefresh ? $rowHydrateMethod->writeEndif() : null;
 
                 if ($shouldRefresh) {
