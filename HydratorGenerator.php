@@ -213,7 +213,14 @@ class HydratorGenerator
             $hydrateMethod->writeln(sprintf('$classMetadata = ' . $this->getMetadataPropertyName($entityClass) . ';'));
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                $idHash[] = '$data[' . var_export($fields[$identifierFieldName], true) . ']';
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
+                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                    $field = $aliasMetaMap[$alias][$column];
+                }else{
+                    $field = $fields[$identifierFieldName];
+                }
+
+                $idHash[] = '$data[' . var_export($field, true) . ']';
             }
             $hydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
             $hydrateMethod->writeln(sprintf('$result = $proxy ?? $this->instantiator->instantiate(' . var_export($entityClass, true) . ');'));
@@ -382,9 +389,16 @@ class HydratorGenerator
 
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                $idHash[] = var_export($identifierFieldName, true) . ' => $data[' . var_export($fields[$identifierFieldName], true) . ']';
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
+                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                    $field = $aliasMetaMap[$alias][$column];
+                }else{
+                    $field = $fields[$identifierFieldName];
+                }
+
+                $idHash[] = var_export($identifierFieldName, true) . ' => $data[' . var_export($field, true) . ']';
             }
-            $hydrateMethod->writeln('$this->unitOfWork->registerManaged($result, [' . implode(" . ' ' . ", $idHash) . '], $entityData);');
+            $hydrateMethod->writeln('$this->unitOfWork->registerManaged($result, [' . implode(" , ", $idHash) . '], $entityData);');
             if ($this->hints[Query::HINT_READ_ONLY] ?? false) {
                 $hydrateMethod->writeln('$this->unitOfWork->markReadOnly($result);');
             }
@@ -407,7 +421,14 @@ class HydratorGenerator
             $classMetadata = $this->getClassMetadata($entityClass);
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                $idHash[] = '$data[' . var_export($fields[$identifierFieldName], true) . ']';
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
+                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                    $field = $aliasMetaMap[$alias][$column];
+                }else{
+                    $field = $fields[$identifierFieldName];
+                }
+
+                $idHash[] = '$data[' . var_export($field, true) . ']';
             }
             $rowHydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
             $rowHydrateMethod
