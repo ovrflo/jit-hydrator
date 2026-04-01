@@ -357,6 +357,8 @@ class HydratorGenerator
                                             ->writeEndif()
                                         ;
                                     }
+                                    $hydrateMethod->writeElse();
+                                    $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, null);');
                                     $hydrateMethod->writeEndif();
                                 }
                             }
