@@ -16,6 +16,8 @@ use Doctrine\ORM\UnitOfWork;
  */
 class JitObjectHydrator extends AbstractHydrator
 {
+    private static ?string $proxyDir = null;
+
     public const HINT_JIT_FLAGS = 'jit_flags';
     public const JIT_FLAG_OPTIMIZE_TYPE_CONVERSION = 1;
     public const JIT_FLAG_STRICT_TYPES = 2;
@@ -45,11 +47,23 @@ class JitObjectHydrator extends AbstractHydrator
     protected array $hints;
     protected ?GeneratedObjectHydrator $generatedObjectHydrator = null;
 
+    public static function getProxyDir(): ?string
+    {
+        return self::$proxyDir;
+    }
+
+    public static function setProxyDir(?string $proxyDir = null): void
+    {
+        self::$proxyDir = $proxyDir;
+    }
+
     public function __construct(EntityManagerInterface $em, bool $debug = false)
     {
         parent::__construct($em);
         $proxyDir = $em->getConfiguration()->getProxyDir();
-        if ($proxyDir) {
+        if (self::$proxyDir) {
+            $this->cacheDir = self::$proxyDir;
+        } elseif ($proxyDir) {
             $this->cacheDir = $proxyDir . '/../JitHydrator';
         }
         $this->debug = $debug;
