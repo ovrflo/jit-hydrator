@@ -78,6 +78,33 @@ class HydratorGenerator
         $isNativeProxy = method_exists($this->entityManager->getConfiguration(), 'isNativeLazyObjectsEnabled') && $this->entityManager->getConfiguration()->isNativeLazyObjectsEnabled();
         $propertyAccessors = $hasPropertyAccessor ? 'propertyAccessors' : 'reflFields';
 
+        // Doctrine ORM 3.7 (GH-12210) made PARTIAL entities work as native lazy ghosts: only the
+        // selected fields are populated, and accessing any other field transparently triggers a
+        // full reload. ResultSetMapping::$partialAliases and UnitOfWork::$partialObjectLoadedFields
+        // both landed in that exact release, so their presence is used as the feature fingerprint
+        // rather than guessing at version numbers. Without native lazy objects (ORM 2.x, 3.0-3.6.x,
+        // or 3.7+ with the feature disabled), PARTIAL queries keep working exactly as they always
+        // have: unselected fields are simply never written, matching stock Doctrine's older behavior.
+        $partialAliasesSupported = property_exists(ResultSetMapping::class, 'partialAliases');
+        $partialObjectLoadedFieldsSupported = property_exists(UnitOfWork::class, 'partialObjectLoadedFields');
+        $registerManagedProxySupported = method_exists(UnitOfWork::class, 'registerManagedProxy');
+        $supportsPartialLazyGhosts = $isNativeProxy && $partialAliasesSupported && $partialObjectLoadedFieldsSupported;
+
+        // Whether THIS query actually has a PARTIAL alias - as opposed to $supportsPartialLazyGhosts,
+        // which just says the environment is capable of it. Class-level scaffolding (the partialGhosts
+        // property, the extra reflectionUow property name below) is gated on this, not on the coarser
+        // environment flag, so that an ordinary non-PARTIAL query run under ORM 3.7 generates the exact
+        // same hydrator it always has - not one carrying always-empty, never-used scaffolding.
+        $anyPartialAlias = false;
+        if ($supportsPartialLazyGhosts) {
+            foreach ($this->rsm->aliasMap as $alias => $entityClass) {
+                if ($this->rsm->partialAliases[$alias] ?? false) {
+                    $anyPartialAlias = true;
+                    break;
+                }
+            }
+        }
+
         $this->classWriter
             ->addUse(Type::class)
             ->addProperty('entityManager', 'private', null, '\\' . EntityManager::class)
@@ -92,6 +119,17 @@ class HydratorGenerator
 
         if ((true === ($this->hints[Query::HINT_REFRESH] ?? null)) || isset($this->hints[Query::HINT_REFRESH_ENTITY])) {
             $this->classWriter->addProperty('refreshedEntities', 'private', '[]', 'array', false, false, 'array of object');
+        }
+
+        if ($anyPartialAlias) {
+            // Tracks OIDs of entities WE deliberately created as partial lazy ghosts (as opposed to
+            // a to-one association reference stub, which also appears as isUninitializedLazyObject()
+            // === true). Without this distinction, re-encountering the same partial entity on a later
+            // row (e.g. via a fetch-joined to-many collection) would look identical to "a stub that
+            // now has real data to fill in", and get force-initialized with the same (still partial)
+            // row data - stranding its other fields as permanently inaccessible instead of leaving
+            // them lazily reloadable.
+            $this->classWriter->addProperty('partialGhosts', 'private', '[]', 'array', false, false, 'array of true, keyed by spl_object_id');
         }
 
         if (!$isNativeProxy) {
@@ -126,7 +164,15 @@ class HydratorGenerator
         $constructor->writeln('$this->instantiator = new \\' . Instantiator::class . '();');
         $constructor->writeln('$this->proxyFactory = $entityManager->getProxyFactory();');
         $constructor->writeln('$this->reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
-        $constructor->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {");
+        $reflectionUowProperties = ['identityMap', 'eagerLoadingEntities'];
+        if ($anyPartialAlias) {
+            $reflectionUowProperties[] = 'partialObjectLoadedFields';
+        }
+        // Built as a single-line literal (not var_export(), which line-wraps arrays) so that
+        // generated output for versions without partialObjectLoadedFields - i.e. every ORM 2.x
+        // and 3.0-3.6.x install - stays byte-identical to before this property was introduced.
+        $reflectionUowPropertiesLiteral = '[' . implode(', ', array_map(static fn (string $name) => var_export($name, true), $reflectionUowProperties)) . ']';
+        $constructor->writeln('foreach (' . $reflectionUowPropertiesLiteral . ' as $propertyName) {');
         $constructor->indent();
         if (PHP_VERSION_ID < 80100) {
             $constructor->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(true);');
@@ -136,7 +182,7 @@ class HydratorGenerator
 
         $cleanupMethod = $this->classWriter->createMethod('cleanup')->setVisibility('public');
         if (PHP_VERSION_ID < 80100) {
-            $cleanupMethod->writeln("foreach (['identityMap', 'eagerLoadingEntities'] as \$propertyName) {")->indent()
+            $cleanupMethod->writeln('foreach (' . $reflectionUowPropertiesLiteral . ' as $propertyName) {')->indent()
                 ->writeln('$this->reflectionUow->getProperty($propertyName)->setAccessible(false);')
                 ->outdent()->writeln('}')
             ;
@@ -198,11 +244,15 @@ class HydratorGenerator
         }
 
         $identityMap = [];
+        /** @var array<string, bool> alias => whether it's hydrated as a partial native-lazy-ghost */
+        $partialAliasFlags = [];
 
         foreach ($aliasColumnMap as $alias => $fields) {
             $entityClass = $this->rsm->aliasMap[$alias];
             $classMetadata = $this->getClassMetadata($entityClass);
             $identityMap[$entityClass] = [];
+            $isPartialAlias = $supportsPartialLazyGhosts && ($this->rsm->partialAliases[$alias] ?? false);
+            $partialAliasFlags[$alias] = $isPartialAlias;
 
             $hydrateMethod = $this->classWriter->createMethod('newEntity_' . $alias);
             $hydrateMethod
@@ -212,20 +262,24 @@ class HydratorGenerator
                 ->addThrows('\\' . self::getDbalExceptionClass())
             ;
             $hydrateMethod->writeln(sprintf('$classMetadata = ' . $this->getMetadataPropertyName($entityClass) . ';'));
+            $identifierDataKeys = $this->resolveIdentifierFieldDataKeys($classMetadata, $alias, $fields, $aliasMetaMap);
             $idHash = [];
-            foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
-                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
-                    $column = self::mappingValue($joinColumns[0], 'name');
-                    $field = $aliasMetaMap[$alias][$column];
-                }else{
-                    $field = $fields[$identifierFieldName];
-                }
-
+            $identifierPairs = [];
+            foreach ($identifierDataKeys as $identifierFieldName => $field) {
                 $idHash[] = '$data[' . var_export($field, true) . ']';
+                $identifierPairs[] = var_export($identifierFieldName, true) . ' => $data[' . var_export($field, true) . ']';
             }
             $hydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
-            $hydrateMethod->writeln(sprintf('$result = $proxy ?? $this->instantiator->instantiate(' . var_export($entityClass, true) . ');'));
+            if ($isPartialAlias) {
+                // A partial entity is hydrated into a native lazy ghost instead of a plain instance:
+                // Doctrine's own ProxyFactory::getProxy() initializer (the same one used for to-one
+                // association references) transparently reloads the full row on first access to any
+                // field we don't set below. $assignIdentifiers=false because the generic field-setting
+                // loop further down already writes identifier fields like any other selected field.
+                $hydrateMethod->writeln('$result = $proxy ?? $this->proxyFactory->getProxy(' . var_export($entityClass, true) . ', [' . implode(', ', $identifierPairs) . '], false);');
+            } else {
+                $hydrateMethod->writeln(sprintf('$result = $proxy ?? $this->instantiator->instantiate(' . var_export($entityClass, true) . ');'));
+            }
             $hydrateMethod->writeln('$oid = spl_object_id($result);');
             if ($objectManagerAwareExists && $classMetadata->reflClass->implementsInterface(ObjectManagerAware::class)) {
                 $hydrateMethod->writeln(sprintf('$result->injectObjectManager($this->entityManager, $classMetadata);'));
@@ -296,7 +350,7 @@ class HydratorGenerator
                 } else {
                     $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export(self::mappingValue($classMetadata->fieldMappings[$field], 'type'), true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                 }
-                if ($hasPropertyAccessor && $this->isFastFieldWriteEligible($classMetadata, $field)) {
+                if ($hasPropertyAccessor && !$isPartialAlias && $this->isFastFieldWriteEligible($classMetadata, $field)) {
                     // $classMetadata->propertyAccessors[$field]->setValue() goes through 1-2 extra
                     // wrapper layers (proxy-safety checks, null-to-typed-property handling) on top of
                     // the underlying ReflectionProperty::setValue() call. Those wrappers only matter
@@ -304,6 +358,8 @@ class HydratorGenerator
                     // i.e. when $proxy !== null. When we've just instantiated a brand new, plain object
                     // ($proxy === null) it can never be a proxy of any kind, so we can call the cached
                     // ReflectionProperty directly and skip the wrapper indirection entirely.
+                    // (Not for partial aliases: there, a $proxy === null $result is a freshly-created
+                    // lazy ghost - an actual proxy - so the safe accessor is always required.)
                     $reflFieldPropertyName = $this->getReflFieldPropertyName($entityClass, $field, true);
                     $fastFieldAccessors[$reflFieldPropertyName] = [$entityClass, $field];
                     $hydrateMethod->writeIf('$proxy === null');
@@ -357,7 +413,15 @@ class HydratorGenerator
                                     }
                                     $hydrateMethod->outdent()->writeln('];');
                                     $hydrateMethod->writeln('$proxy_' . $alias . '_' . $name . ' = $this->identityMap[' . var_export($targetEntityClass, true) . '][$idHash] =  $this->proxyFactory->getProxy(' . var_export($targetEntityClass, true) . ', $reference);');
-                                    $hydrateMethod->writeln('$this->unitOfWork->registerManaged($proxy_' . $alias . '_' . $name . ', $reference, []);');
+                                    if ($registerManagedProxySupported) {
+                                        // registerManagedProxy() also records "zero fields loaded" for this OID in
+                                        // UnitOfWork's own partialObjectLoadedFields map (ORM 3.7+), which
+                                        // computeChangeSet() now treats as the source of truth for which fields to
+                                        // diff once this reference proxy gets initialized.
+                                        $hydrateMethod->writeln('$this->unitOfWork->registerManagedProxy($proxy_' . $alias . '_' . $name . ', $reference);');
+                                    } else {
+                                        $hydrateMethod->writeln('$this->unitOfWork->registerManaged($proxy_' . $alias . '_' . $name . ', $reference, []);');
+                                    }
                                     $hydrateMethod->writeEndif();
                                     $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
                                     if ($shouldDeferEagerLoading) {
@@ -406,19 +470,28 @@ class HydratorGenerator
                 }
             }
 
-            $idHash = [];
-            foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
-                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
-                    $column = self::mappingValue($joinColumns[0], 'name');
-                    $field = $aliasMetaMap[$alias][$column];
-                }else{
-                    $field = $fields[$identifierFieldName];
-                }
-
-                $idHash[] = var_export($identifierFieldName, true) . ' => $data[' . var_export($field, true) . ']';
+            $hydrateMethod->writeln('$this->unitOfWork->registerManaged($result, [' . implode(" , ", $identifierPairs) . '], $entityData);');
+            if ($isPartialAlias) {
+                // Only for a freshly-created ghost ($proxy === null): mark it as a partial ghost (so the
+                // isUninitializedLazyObject() re-check on later rows leaves it alone, see $partialGhosts
+                // above) and tell UnitOfWork which fields are actually loaded, by poking its private
+                // partialObjectLoadedFields map via reflection - the same technique already used for
+                // eagerLoadingEntities. Without this, editing a loaded field before the ghost's own
+                // lazy-reload initializer fires would be silently discarded once it does fire, since
+                // UnitOfWork would have no record that this OID was ever partially (rather than fully)
+                // loaded, and would treat the initializer's full-row reload as authoritative for every
+                // field. A $proxy that's being refreshed (HINT_REFRESH) is left alone here and simply
+                // keeps whatever partial/full status it already had.
+                $hydrateMethod
+                    ->writeIf('$proxy === null')
+                    ->writeln('$this->partialGhosts[$oid] = true;')
+                    ->writeln('$partialObjectLoadedFieldsProperty = $this->reflectionUow->getProperty(\'partialObjectLoadedFields\');')
+                    ->writeln('$partialObjectLoadedFields = $partialObjectLoadedFieldsProperty->getValue($this->unitOfWork);')
+                    ->writeln('$partialObjectLoadedFields[$oid] = ' . var_export(array_keys($fields), true) . ';')
+                    ->writeln('$partialObjectLoadedFieldsProperty->setValue($this->unitOfWork, $partialObjectLoadedFields);')
+                    ->writeEndif()
+                ;
             }
-            $hydrateMethod->writeln('$this->unitOfWork->registerManaged($result, [' . implode(" , ", $idHash) . '], $entityData);');
             if ($this->hints[Query::HINT_READ_ONLY] ?? false) {
                 $hydrateMethod->writeln('$this->unitOfWork->markReadOnly($result);');
             }
@@ -439,16 +512,9 @@ class HydratorGenerator
             $shouldRefresh = ($this->hints[Query::HINT_REFRESH] ?? false) || (($this->hints[Query::HINT_REFRESH_ENTITY] ?? null) === $entityClass);
             $entityClassEscaped = var_export($entityClass, true);
             $classMetadata = $this->getClassMetadata($entityClass);
+            $isPartialAlias = $partialAliasFlags[$alias] ?? false;
             $idHash = [];
-            foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
-                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
-                    $column = self::mappingValue($joinColumns[0], 'name');
-                    $field = $aliasMetaMap[$alias][$column];
-                }else{
-                    $field = $fields[$identifierFieldName];
-                }
-
+            foreach ($this->resolveIdentifierFieldDataKeys($classMetadata, $alias, $fields, $aliasMetaMap) as $field) {
                 $idHash[] = '$data[' . var_export($field, true) . ']';
             }
             $rowHydrateMethod->writeln(sprintf('$idHash = ' . implode(" . ' ' . ", $idHash) . ';'));
@@ -460,8 +526,12 @@ class HydratorGenerator
                 ->writeln('$entity_' . $alias . ' = $this->identityMap[' . $entityClassEscaped . '][$idHash];')
             ;
             if ($isNativeProxy) {
+                // For a deliberately-partial ghost (see $partialGhosts above), isUninitializedLazyObject()
+                // being true just means "not yet fully loaded", not "needs refreshing from this row's
+                // (still partial) data" - so it's excluded from the auto-trigger here. An explicit
+                // HINT_REFRESH still forces a reload via the shouldRefresh OR-clause below regardless.
                 $rowHydrateMethod
-                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($entity_' . $alias . '))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')])' : ''))
+                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($entity_' . $alias . ')' . ($isPartialAlias ? ' && !isset($this->partialGhosts[spl_object_id($entity_' . $alias . ')])' : '') . ')' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $entity_' . $alias . ');')
                 ;
 
@@ -511,7 +581,7 @@ class HydratorGenerator
 
             if ($isNativeProxy) {
                 $rowHydrateMethod
-                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($uow_entity_' . $alias . '))' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')])' : ''))
+                    ->writeIf('($isUninitialized = '.$this->getMetadataPropertyName($entityClass).'->reflClass->isUninitializedLazyObject($uow_entity_' . $alias . ')' . ($isPartialAlias ? ' && !isset($this->partialGhosts[spl_object_id($uow_entity_' . $alias . ')])' : '') . ')' . ($shouldRefresh ? ' || !isset($this->refreshedEntities[' . $entityClassEscaped . '][spl_object_id($uow_entity_' . $alias . ')])' : ''))
                     ->writeln('$this->newEntity_' . $alias . '($data, $uow_entity_' . $alias . ');')
                 ;
 
@@ -665,6 +735,33 @@ class HydratorGenerator
     private function getMetadataPropertyName(string $class, bool $onlyName = false)
     {
         return (!$onlyName ? '$this->' : '') . 'metadata_' . str_replace('\\', '_', strtolower($class));
+    }
+
+    /**
+     * Resolves, for each identifier field of $classMetadata, the $data key that holds its value for
+     * $alias's row data - handling the case where the identifier field is itself a to-one owning-side
+     * association (the row then carries the value under its join column's meta-mapping key, not under
+     * the field's own mapping key).
+     *
+     * @param array<string, string> $fields Field name => $data key, for $alias's regular column mappings.
+     * @param array<string, array<string, string>> $aliasMetaMap Alias => join/meta column name => $data key.
+     *
+     * @return array<string, string> Identifier field name => $data key.
+     */
+    private function resolveIdentifierFieldDataKeys(ClassMetadata $classMetadata, string $alias, array $fields, array $aliasMetaMap): array
+    {
+        $identifierDataKeys = [];
+        foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
+            if (isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])) {
+                $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
+                $column = self::mappingValue($joinColumns[0], 'name');
+                $identifierDataKeys[$identifierFieldName] = $aliasMetaMap[$alias][$column];
+            } else {
+                $identifierDataKeys[$identifierFieldName] = $fields[$identifierFieldName];
+            }
+        }
+
+        return $identifierDataKeys;
     }
 
     /**

@@ -53,6 +53,27 @@ $entityManager->getConfiguration()->addCustomHydrationMode('jit', \Ovrflo\JitHyd
 After you registered it, in order to use it you need 2 things. The most important one is `getResult('jit')` which tells Doctrine to use That hydrator.
 The second thing is `->setHint(Query::HINT_INCLUDE_META_COLUMNS, true)`. That's needed because otherwise Doctrine doesn't pass relation metadata to the Hydrator and it won't be able to work without it. Currently, only Doctrine's own ObjectHydrator receives this info without that Query Hint.
 
+# PARTIAL queries
+
+`PARTIAL` DQL queries (selecting only some of an entity's fields) are supported on every Doctrine
+ORM version this library supports, matching whatever behavior the installed ORM version itself
+gives partial objects:
+
+- **Doctrine ORM 2.x, 3.0-3.6.x, or 3.7+ with native lazy objects disabled**: unselected fields are
+  simply never written - the classic partial-object behavior. Accessing one of them reads whatever
+  the property's default/uninitialized state is; you need an explicit `EntityManager::refresh()` (or
+  a query with the refresh hint) to load the rest.
+- **Doctrine ORM 3.7+ with native lazy objects enabled** (PHP 8.4+, see
+  [GH-12210](https://github.com/doctrine/orm/pull/12210)): a partial entity is hydrated as a native
+  lazy ghost, exactly like stock `ObjectHydrator`. Accessing any field that wasn't selected
+  transparently triggers a single `SELECT` that loads the rest of the entity; any edits you already
+  made to the loaded fields are preserved. Which behavior you get is auto-detected from the
+  installed ORM version - no configuration needed on this library's side.
+
+One deliberate limitation: if you combine `PARTIAL` with an explicit `Query::HINT_REFRESH` on the
+same alias, the refreshed ghost is left lazy rather than force-marked as fully initialized, so it
+will still (correctly) reload on next access to an unselected field rather than risk stranding it.
+
 # Status
 While this is currently running in production on a relatively small app, I wouldn't dare calling it production-ready. I'm sure there are a few bugs to squash in there. In my limited testing it worked, significantly lowering response times and CPU usage.
 Less CPU time means happier users and also lower power bills. Sure, we don't tend to think about power bills, but if you're running a huge infrastructure that heavily uses Doctrine ORM, it might actually make a difference. If power usage isn't a concern, than at least consider having more CPU headroom for your codebase.
