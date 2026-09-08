@@ -130,6 +130,9 @@ class HydratorGenerator
             // row data - stranding its other fields as permanently inaccessible instead of leaving
             // them lazily reloadable.
             $this->classWriter->addProperty('partialGhosts', 'private', '[]', 'array', false, false, 'array of true, keyed by spl_object_id');
+            // Resolved once here instead of via reflectionUow->getProperty() on every partial-ghost
+            // creation, which would otherwise redo the same reflection lookup on every row.
+            $this->classWriter->addProperty('partialObjectLoadedFieldsProperty', 'private', null, '\\ReflectionProperty', false, false);
         }
 
         if (!$isNativeProxy) {
@@ -164,7 +167,10 @@ class HydratorGenerator
         $constructor->writeln('$this->instantiator = new \\' . Instantiator::class . '();');
         $constructor->writeln('$this->proxyFactory = $entityManager->getProxyFactory();');
         $constructor->writeln('$this->reflectionUow = new \\ReflectionClass(' . var_export(UnitOfWork::class, true) . ');');
-        $reflectionUowProperties = ['identityMap', 'eagerLoadingEntities'];
+        // 'identityMap' (UnitOfWork's own, unrelated to $this->identityMap above) is deliberately not
+        // in this list: nothing in the generated class ever reads or writes it via reflection, so
+        // making it accessible would be pure wasted work on every construction/cleanup on PHP < 8.1.
+        $reflectionUowProperties = ['eagerLoadingEntities'];
         if ($anyPartialAlias) {
             $reflectionUowProperties[] = 'partialObjectLoadedFields';
         }
@@ -179,6 +185,9 @@ class HydratorGenerator
         }
         $constructor->outdent();
         $constructor->writeln('}');
+        if ($anyPartialAlias) {
+            $constructor->writeln('$this->partialObjectLoadedFieldsProperty = $this->reflectionUow->getProperty(\'partialObjectLoadedFields\');');
+        }
 
         $cleanupMethod = $this->classWriter->createMethod('cleanup')->setVisibility('public');
         if (PHP_VERSION_ID < 80100) {
@@ -197,6 +206,10 @@ class HydratorGenerator
         $globalInitializedTypes = [];
         /** @var array<string, array{0: string, 1: string}> propertyName => [entityClass, field] */
         $fastFieldAccessors = [];
+        // Whether any deferred-eager-load block below ends up emitted; if so, the ReflectionProperty
+        // for UnitOfWork::$eagerLoadingEntities is resolved once in the constructor (see below) instead
+        // of being re-fetched via reflectionUow->getProperty() every time a matching row is hydrated.
+        $needsEagerLoadingEntitiesProperty = false;
         foreach ($this->rsm->aliasMap as $alias => $entityClass) {
             if (!isset($selectedEntities[$entityClass])) {
                 $selectedEntities[$entityClass] = true;
@@ -425,6 +438,7 @@ class HydratorGenerator
                                     $hydrateMethod->writeEndif();
                                     $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, $proxy_' . $alias . '_' . $name . ');');
                                     if ($shouldDeferEagerLoading) {
+                                        $needsEagerLoadingEntitiesProperty = true;
                                         $checkProxyCondition = null;
                                         switch (true) {
                                             case $isNativeProxy:
@@ -440,10 +454,9 @@ class HydratorGenerator
                                         $hydrateMethod->writeln('$singleIdentifier = Type::getType(' . var_export($this->rsm->typeMappings[$column], true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                                         $hydrateMethod
                                             ->writeIf($checkProxyCondition)
-                                            ->writeln('$eagerLoadingEntitiesProperty = $this->reflectionUow->getProperty(\'eagerLoadingEntities\');')
-                                            ->writeln('$eagerLoadingEntities = $eagerLoadingEntitiesProperty->getValue($this->unitOfWork);')
+                                            ->writeln('$eagerLoadingEntities = $this->eagerLoadingEntitiesProperty->getValue($this->unitOfWork);')
                                             ->writeln('$eagerLoadingEntities['.var_export($targetEntityClass, true).'][(string) $singleIdentifier] = $singleIdentifier;')
-                                            ->writeln('$eagerLoadingEntitiesProperty->setValue($this->unitOfWork, $eagerLoadingEntities);')
+                                            ->writeln('$this->eagerLoadingEntitiesProperty->setValue($this->unitOfWork, $eagerLoadingEntities);')
                                             ->writeEndif()
                                         ;
                                     }
@@ -485,10 +498,9 @@ class HydratorGenerator
                 $hydrateMethod
                     ->writeIf('$proxy === null')
                     ->writeln('$this->partialGhosts[$oid] = true;')
-                    ->writeln('$partialObjectLoadedFieldsProperty = $this->reflectionUow->getProperty(\'partialObjectLoadedFields\');')
-                    ->writeln('$partialObjectLoadedFields = $partialObjectLoadedFieldsProperty->getValue($this->unitOfWork);')
+                    ->writeln('$partialObjectLoadedFields = $this->partialObjectLoadedFieldsProperty->getValue($this->unitOfWork);')
                     ->writeln('$partialObjectLoadedFields[$oid] = ' . var_export(array_keys($fields), true) . ';')
-                    ->writeln('$partialObjectLoadedFieldsProperty->setValue($this->unitOfWork, $partialObjectLoadedFields);')
+                    ->writeln('$this->partialObjectLoadedFieldsProperty->setValue($this->unitOfWork, $partialObjectLoadedFields);')
                     ->writeEndif()
                 ;
             }
@@ -695,6 +707,11 @@ class HydratorGenerator
         foreach ($fastFieldAccessors as $reflFieldPropertyName => [$class, $field]) {
             $this->classWriter->addProperty($reflFieldPropertyName, 'private', null, '\\ReflectionProperty', false, false, 'for ' . $class . '::$' . $field);
             $constructor->writeln('$this->' . $reflFieldPropertyName . ' = $this->' . $this->getMetadataPropertyName($class, true) . '->propertyAccessors[' . var_export($field, true) . ']->getUnderlyingReflector();');
+        }
+
+        if ($needsEagerLoadingEntitiesProperty) {
+            $this->classWriter->addProperty('eagerLoadingEntitiesProperty', 'private', null, '\\ReflectionProperty', false, false);
+            $constructor->writeln('$this->eagerLoadingEntitiesProperty = $this->reflectionUow->getProperty(\'eagerLoadingEntities\');');
         }
 
         foreach ($hydrateMethods as $entityClass => $method) {
