@@ -17,6 +17,8 @@ The table below shows a comparison of the hydrators for a query that returned 1,
 | array         | 7.77 | 8.66 | 18.73 | 119.54 | 1137.93 | 11265.48 | 118089.68 |
 | **jit**       | 3.07 | 3.42 | 6.12  | 33.05  | 287.47  | 2686.87  | 29322.57  |
 
+This table was measured against Doctrine ORM 2.x. On ORM 3.x, `ObjectHydrator` itself got noticeably faster (its property-write path changed), which narrows the gap: recent measurements against ORM 3.7 showed jit-hydrator around 30% faster than `ObjectHydrator` for large flat result sets, not 50-80%. Numbers will vary by query shape and ORM version; treat the table as illustrative rather than a current benchmark.
+
 # Installation
 
 ### 1. Install package via composer

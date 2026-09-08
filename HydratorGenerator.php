@@ -3,14 +3,13 @@
 namespace Ovrflo\JitHydrator;
 
 use Doctrine\Common\Collections\ArrayCollection;
-use Doctrine\DBAL\ForwardCompatibility\Result;
+use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Event\ListenersInvoker;
 use Doctrine\ORM\Internal\HydrationCompleteHandler;
 use Doctrine\ORM\Query;
 use Doctrine\Persistence\NotifyPropertyChanged;
 use Doctrine\Persistence\ObjectManagerAware;
-use Doctrine\DBAL\DBALException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Statement;
 use Doctrine\DBAL\Types\Type;
@@ -74,7 +73,7 @@ class HydratorGenerator
     {
         $objectManagerAwareExists = class_exists(ObjectManagerAware::class);
         $rootEntities = array_diff(array_keys($this->rsm->aliasMap), array_keys($this->rsm->parentAliasMap));
-        $isLazyGhostProxy = $this->entityManager->getConfiguration()->isLazyGhostObjectEnabled();
+        $isLazyGhostProxy = method_exists($this->entityManager->getConfiguration(), 'isLazyGhostObjectEnabled') && $this->entityManager->getConfiguration()->isLazyGhostObjectEnabled();
         $hasPropertyAccessor = property_exists(ClassMetadata::class, 'propertyAccessors');
         $isNativeProxy = method_exists($this->entityManager->getConfiguration(), 'isNativeLazyObjectsEnabled') && $this->entityManager->getConfiguration()->isNativeLazyObjectsEnabled();
         $propertyAccessors = $hasPropertyAccessor ? 'propertyAccessors' : 'reflFields';
@@ -103,7 +102,7 @@ class HydratorGenerator
 
         $constructor = $this->classWriter->createMethod('__construct', ['entityManager', '\\' . EntityManager::class])->setVisibility('public');
         $queryString = null;
-        if ($this->stmt instanceof Result) {
+        if ($this->stmt instanceof Result && method_exists($this->stmt, 'getIterator')) {
             $queryString = $this->stmt->getIterator()->queryString ?? null;
         } elseif ($this->stmt instanceof Statement) {
             $queryString = $this->stmt->queryString ?? null;
@@ -150,6 +149,8 @@ class HydratorGenerator
         $classMetadata = [];
         $selectedEntities = [];
         $globalInitializedTypes = [];
+        /** @var array<string, array{0: string, 1: string}> propertyName => [entityClass, field] */
+        $fastFieldAccessors = [];
         foreach ($this->rsm->aliasMap as $alias => $entityClass) {
             if (!isset($selectedEntities[$entityClass])) {
                 $selectedEntities[$entityClass] = true;
@@ -208,13 +209,14 @@ class HydratorGenerator
                 ->addArgument('data', 'array')
                 ->addArgument('proxy', $isNativeProxy ? '?object' : '?Proxy', 'null')
                 ->setReturnType('\\' . $entityClass)
-                ->addThrows('\\' . DBALException::class)
+                ->addThrows('\\' . self::getDbalExceptionClass())
             ;
             $hydrateMethod->writeln(sprintf('$classMetadata = ' . $this->getMetadataPropertyName($entityClass) . ';'));
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
-                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
+                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
+                    $column = self::mappingValue($joinColumns[0], 'name');
                     $field = $aliasMetaMap[$alias][$column];
                 }else{
                     $field = $fields[$identifierFieldName];
@@ -236,7 +238,7 @@ class HydratorGenerator
             if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
                 $initializedTypes = [];
                 foreach ($fields as $field => $column) {
-                    $type = $classMetadata->fieldMappings[$field]->type;
+                    $type = self::mappingValue($classMetadata->fieldMappings[$field], 'type');
                     $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     if (!isset($globalInitializedTypes[$type]) && !in_array($type, [Types::TEXT, Types::STRING, Types::BOOLEAN, Types::BIGINT, Types::INTEGER, Types::SMALLINT, Types::DECIMAL, Types::FLOAT, Types::SIMPLE_ARRAY, Types::DATETIME_MUTABLE, Types::DATETIME_IMMUTABLE])) {
                         $globalInitializedTypes[$type] = true;
@@ -253,7 +255,7 @@ class HydratorGenerator
                 $hydrateMethod->writeln('// hydrate ' . $alias . '.' . $field);
                 $exportedKey = var_export($column, true);
                 if (isset($this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) && $this->flags[JitObjectHydrator::JIT_FLAG_OPTIMIZE_TYPE_CONVERSION]) {
-                    $type = $classMetadata->fieldMappings[$field]->type;
+                    $type = self::mappingValue($classMetadata->fieldMappings[$field], 'type');
                     $typeVariableName = trim(preg_replace('#[^_\\w]+#', '_', str_replace('\\', '__', $type)), '_');
                     switch ($type) {
                         case Types::TEXT:
@@ -275,11 +277,11 @@ class HydratorGenerator
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? null : (float) $data[' . $exportedKey . '];');
                             break;
                         case Types::SIMPLE_ARRAY:
-                            $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? [] : (is_resource($data[' . $exportedKey . ']) ? explode(\',\', stream_get_contents($value)) : explode(\',\', $data[' . $exportedKey . ']));');
+                            $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = (null === $data[' . $exportedKey . ']) ? [] : (is_resource($data[' . $exportedKey . ']) ? explode(\',\', stream_get_contents($data[' . $exportedKey . '])) : explode(\',\', $data[' . $exportedKey . ']));');
                             break;
                         case Types::DATETIME_MUTABLE:
                         case Types::DATETIME_IMMUTABLE:
-                            $dateTimeClass = $classMetadata->fieldMappings[$field]->type === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
+                            $dateTimeClass = self::mappingValue($classMetadata->fieldMappings[$field], 'type') === Types::DATETIME_MUTABLE ? \DateTime::class : \DateTimeImmutable::class;
                             $hydrateMethod->writeln('$value = $data[' . $exportedKey . '];');
                             $hydrateMethod->writeln('$value = (null === $value || $value instanceof \\DateTimeInterface) ? $value : \\' . $dateTimeClass . '::createFromFormat(' . var_export($this->entityManager->getConnection()->getDatabasePlatform()->getDateTimeFormatString(), true) . ', $value);');
                             $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $value ?: (null !== $data[' . $exportedKey . '] ? \\date_create($data[' . $exportedKey . ']) : null);');
@@ -288,39 +290,56 @@ class HydratorGenerator
                             if (isset($initializedTypes[$type])) {
                                 $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = $type_' . $typeVariableName . '->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             } else {
-                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]->type, true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                                $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export(self::mappingValue($classMetadata->fieldMappings[$field], 'type'), true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                             }
                     }
                 } else {
-                    $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export($classMetadata->fieldMappings[$field]->type, true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
+                    $hydrateMethod->writeln('$value = $entityData[' . var_export($field, true) . '] = Type::getType(' . var_export(self::mappingValue($classMetadata->fieldMappings[$field], 'type'), true) . ')->convertToPHPValue($data[' . var_export($column, true) . '], $this->databasePlatform);');
                 }
-                $hydrateMethod->writeln(sprintf('$classMetadata->'.$propertyAccessors.'[' . var_export($field, true) . ']->setValue($result, $value);'));
+                if ($hasPropertyAccessor && $this->isFastFieldWriteEligible($classMetadata, $field)) {
+                    // $classMetadata->propertyAccessors[$field]->setValue() goes through 1-2 extra
+                    // wrapper layers (proxy-safety checks, null-to-typed-property handling) on top of
+                    // the underlying ReflectionProperty::setValue() call. Those wrappers only matter
+                    // when $result might be an existing (possibly still-uninitialized) lazy object -
+                    // i.e. when $proxy !== null. When we've just instantiated a brand new, plain object
+                    // ($proxy === null) it can never be a proxy of any kind, so we can call the cached
+                    // ReflectionProperty directly and skip the wrapper indirection entirely.
+                    $reflFieldPropertyName = $this->getReflFieldPropertyName($entityClass, $field, true);
+                    $fastFieldAccessors[$reflFieldPropertyName] = [$entityClass, $field];
+                    $hydrateMethod->writeIf('$proxy === null');
+                    $hydrateMethod->writeln('$this->' . $reflFieldPropertyName . '->setValue($result, $value);');
+                    $hydrateMethod->writeElse();
+                    $hydrateMethod->writeln(sprintf('$classMetadata->'.$propertyAccessors.'[' . var_export($field, true) . ']->setValue($result, $value);'));
+                    $hydrateMethod->writeEndif();
+                } else {
+                    $hydrateMethod->writeln(sprintf('$classMetadata->'.$propertyAccessors.'[' . var_export($field, true) . ']->setValue($result, $value);'));
+                }
                 $hydrateMethod->writeln();
             }
 
             if (count($classMetadata->getAssociationMappings())) {
                 foreach ($classMetadata->getAssociationMappings() as $name => $mapping) {
-                    $targetEntityClass = $mapping->targetEntity;
+                    $targetEntityClass = self::mappingValue($mapping, 'targetEntity');
                     $targetClassMetadata = $this->getClassMetadata($targetEntityClass);
                     $classMetadataConstructorMap[$targetEntityClass][] = $alias . '_' . $name;
-                    switch ($mapping->type()) {
+                    switch (self::mappingType($mapping)) {
                         case ClassMetadata::ONE_TO_ONE:
                         case ClassMetadata::MANY_TO_ONE:
                             if (!isset($joinedRelations[$alias][$name])) {
                                 $fetchMode = isset($this->hints['fetchMode'][$classMetadata->name][$name])
                                     ? $this->hints['fetchMode'][$classMetadata->name][$name]
-                                    : $mapping->fetch
+                                    : self::mappingValue($mapping, 'fetch')
                                 ;
                                 $isEagerLoading = $fetchMode === ClassMetadata::FETCH_EAGER;
                                 $isDeferredEagerLoading = $isEagerLoading && isset($this->hints[UnitOfWork::HINT_DEFEREAGERLOAD]) && true === $this->hints[UnitOfWork::HINT_DEFEREAGERLOAD];
                                 $shouldDeferEagerLoading = $isDeferredEagerLoading && !$targetClassMetadata->isIdentifierComposite;
 
-                                $hydrateMethod->writeln('// hydrate ' . ($mapping->type() === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
-                                $metaColumnsIncluded = count(array_diff(array_keys($mapping->sourceToTargetKeyColumns), array_keys($aliasMetaMap[$alias]))) === 0;
-                                $column = $aliasMetaMap[$alias][array_keys($mapping->sourceToTargetKeyColumns)[0]];
+                                $hydrateMethod->writeln('// hydrate ' . (self::mappingType($mapping) === ClassMetadata::ONE_TO_ONE ? 'one' : 'many') . '-to-one ' . $name);
+                                $metaColumnsIncluded = count(array_diff(array_keys(self::mappingValue($mapping, 'sourceToTargetKeyColumns')), array_keys($aliasMetaMap[$alias]))) === 0;
+                                $column = $aliasMetaMap[$alias][array_keys(self::mappingValue($mapping, 'sourceToTargetKeyColumns'))[0]];
                                 if ($metaColumnsIncluded) {
                                     $ifColumns = [];
-                                    foreach (array_keys($mapping->sourceToTargetKeyColumns) as $joinColumnName) {
+                                    foreach (array_keys(self::mappingValue($mapping, 'sourceToTargetKeyColumns')) as $joinColumnName) {
                                         $ifColumns[] = '$data[' . var_export($aliasMetaMap[$alias][$joinColumnName], true) . ']';
                                     }
                                     $hydrateMethod->writeIf(implode(' !== null || ', $ifColumns) . ' !== null');
@@ -370,7 +389,7 @@ class HydratorGenerator
                             break;
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
-                            $hydrateMethod->writeln('// hydrate ' . ($mapping->type() === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
+                            $hydrateMethod->writeln('// hydrate ' . (self::mappingType($mapping) === ClassMetadata::ONE_TO_MANY ? 'one' : 'many') . '-to-many ' . $name);
                             $hydrateMethod->writeln('$collection_' . $name . ' = (new \\' . PersistentCollection::class . '($this->entityManager, ' . $this->getMetadataPropertyName($targetEntityClass) . ', new \\' . ArrayCollection::class . '()));');
                             if (!isset($joinedRelations[$alias][$name])) {
                                 $hydrateMethod->writeln('$collection_' . $name . '->setInitialized(false);');
@@ -389,8 +408,9 @@ class HydratorGenerator
 
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
-                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
+                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
+                    $column = self::mappingValue($joinColumns[0], 'name');
                     $field = $aliasMetaMap[$alias][$column];
                 }else{
                     $field = $fields[$identifierFieldName];
@@ -421,8 +441,9 @@ class HydratorGenerator
             $classMetadata = $this->getClassMetadata($entityClass);
             $idHash = [];
             foreach ($classMetadata->getIdentifierFieldNames() as $identifierFieldName) {
-                if(isset($classMetadata->associationMappings[$identifierFieldName]) && $classMetadata->associationMappings[$identifierFieldName]->isToOneOwningSide()){
-                    $column = $classMetadata->associationMappings[$identifierFieldName]->joinColumns[0]->name;
+                if(isset($classMetadata->associationMappings[$identifierFieldName]) && self::isToOneOwningSide($classMetadata->associationMappings[$identifierFieldName])){
+                    $joinColumns = self::mappingValue($classMetadata->associationMappings[$identifierFieldName], 'joinColumns');
+                    $column = self::mappingValue($joinColumns[0], 'name');
                     $field = $aliasMetaMap[$alias][$column];
                 }else{
                     $field = $fields[$identifierFieldName];
@@ -563,9 +584,9 @@ class HydratorGenerator
                     ->writeIf('$entity_' . $alias . ' !== null')
                 ;
                 foreach ($classMetadata->getAssociationMappings() as $name => $mapping) {
-                    $targetEntityClass = $mapping->targetEntity;
+                    $targetEntityClass = self::mappingValue($mapping, 'targetEntity');
                     $targetClassMetadata = $this->getClassMetadata($targetEntityClass);
-                    switch ($mapping->type()) {
+                    switch (self::mappingType($mapping)) {
                         case ClassMetadata::MANY_TO_ONE:
                         case ClassMetadata::ONE_TO_ONE:
                             if (isset($joinedRelations[$alias][$name])) {
@@ -598,6 +619,12 @@ class HydratorGenerator
             $metadataPropertyName = $this->getMetadataPropertyName($class, true);
             $this->classWriter->addProperty($metadataPropertyName, 'private', null, '\\' . ClassMetadata::class, false, false, 'for ' . $class);
             $constructor->writeln('$this->' . $metadataPropertyName . ' = $this->entityManager->getClassMetadata(' . var_export($class, true) . ');');
+        }
+
+        // Must run after the metadata properties above are assigned, since it reads propertyAccessors off of them.
+        foreach ($fastFieldAccessors as $reflFieldPropertyName => [$class, $field]) {
+            $this->classWriter->addProperty($reflFieldPropertyName, 'private', null, '\\ReflectionProperty', false, false, 'for ' . $class . '::$' . $field);
+            $constructor->writeln('$this->' . $reflFieldPropertyName . ' = $this->' . $this->getMetadataPropertyName($class, true) . '->propertyAccessors[' . var_export($field, true) . ']->getUnderlyingReflector();');
         }
 
         foreach ($hydrateMethods as $entityClass => $method) {
@@ -638,5 +665,110 @@ class HydratorGenerator
     private function getMetadataPropertyName(string $class, bool $onlyName = false)
     {
         return (!$onlyName ? '$this->' : '') . 'metadata_' . str_replace('\\', '_', strtolower($class));
+    }
+
+    /**
+     * Reads a value out of a field/association mapping regardless of whether it's
+     * represented as a plain array (Doctrine ORM 2.x) or a mapping value object
+     * (Doctrine ORM 3.x).
+     *
+     * @param array|object $mapping
+     * @return mixed
+     */
+    private static function mappingValue($mapping, string $key)
+    {
+        if (is_array($mapping)) {
+            return $mapping[$key] ?? null;
+        }
+
+        return $mapping->$key ?? null;
+    }
+
+    /**
+     * Returns the association type constant (see ClassMetadata::*_TO_*) for a mapping,
+     * regardless of whether it's an array (ORM 2.x) or a mapping object exposing a
+     * type() method (ORM 3.x).
+     *
+     * @param array|object $mapping
+     */
+    private static function mappingType($mapping): int
+    {
+        return is_array($mapping) ? $mapping['type'] : $mapping->type();
+    }
+
+    /**
+     * @param array|object $mapping
+     */
+    private static function isToOneOwningSide($mapping): bool
+    {
+        if (is_object($mapping)) {
+            return $mapping->isToOneOwningSide();
+        }
+
+        if ($mapping['type'] === ClassMetadata::MANY_TO_ONE) {
+            return true;
+        }
+
+        return $mapping['type'] === ClassMetadata::ONE_TO_ONE && !empty($mapping['joinColumns']);
+    }
+
+    private static function getDbalExceptionClass(): string
+    {
+        if (class_exists(\Doctrine\DBAL\DBALException::class)) {
+            return \Doctrine\DBAL\DBALException::class;
+        }
+
+        if (interface_exists(\Doctrine\DBAL\Exception::class)) {
+            return \Doctrine\DBAL\Exception::class;
+        }
+
+        return \Exception::class;
+    }
+
+    /**
+     * Whether it's safe to write $field directly through a cached ReflectionProperty
+     * instead of $classMetadata->propertyAccessors[$field] when we know $result is a
+     * brand new, plain (never-proxied) instance. Unsafe/ineligible for:
+     *  - embedded fields (dotted field names): the accessor creates/delegates to a
+     *    nested embeddable object, which raw reflection can't replicate;
+     *  - enum-backed fields: the accessor converts the raw scalar to/from the enum;
+     *  - fields whose PHP property type doesn't allow null while the DB column does:
+     *    the accessor "unsets" the property instead of assigning null there (assigning
+     *    null directly would throw a TypeError).
+     *
+     * Only called when $classMetadata->propertyAccessors is available (ORM 3.4+); on
+     * older ORM versions the generator already writes through the underlying
+     * ReflectionProperty directly via $classMetadata->reflFields, so there is nothing
+     * to optimize there.
+     */
+    private static function isFastFieldWriteEligible(ClassMetadata $classMetadata, string $field): bool
+    {
+        if (strpos($field, '.') !== false) {
+            return false;
+        }
+
+        $fieldMapping = $classMetadata->fieldMappings[$field] ?? null;
+        if ($fieldMapping !== null && self::mappingValue($fieldMapping, 'enumType') !== null) {
+            return false;
+        }
+
+        $accessor = $classMetadata->propertyAccessors[$field] ?? null;
+        if ($accessor === null) {
+            return false;
+        }
+
+        $reflField = $accessor->getUnderlyingReflector();
+        if (!$reflField->hasType() || $reflField->getType()->allowsNull()) {
+            return true;
+        }
+
+        return $fieldMapping !== null && self::mappingValue($fieldMapping, 'nullable') !== true;
+    }
+
+    private function getReflFieldPropertyName(string $class, string $field, bool $onlyName = false): string
+    {
+        $safeField = preg_replace('#[^A-Za-z0-9_]#', '_', $field);
+
+        return (!$onlyName ? '$this->' : '') . 'reflField_' . str_replace('\\', '_', strtolower($class)) . '_' . $safeField;
     }
 }

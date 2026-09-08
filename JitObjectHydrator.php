@@ -11,11 +11,47 @@ use Doctrine\ORM\Query;
 use Doctrine\ORM\Query\ResultSetMapping;
 use Doctrine\ORM\UnitOfWork;
 
+/*
+ * Doctrine ORM 3.x declares `AbstractHydrator::hydrateAllData(): mixed`, while
+ * Doctrine ORM 2.x declares it with no return type at all (`mixed` didn't exist
+ * before PHP 8.0, which ORM 2.x still has to support). PHP requires an override
+ * to match the parent's return type exactly (or omit it if the parent has none),
+ * so a single hard-coded signature can't satisfy both major versions - and using
+ * `: mixed` unconditionally would break under ORM 2.x + PHP 7.4, since PHP would
+ * treat the unrecognized `mixed` type as a (non-existent) class name and fail
+ * every call with a TypeError.
+ *
+ * We inspect the actually installed AbstractHydrator via reflection and eval a
+ * tiny trait exposing a `hydrateAllData()` shim with whatever return type (or
+ * lack thereof) that installed version requires, forwarding to doHydrateAllData().
+ */
+if (!trait_exists(JitObjectHydratorReturnTypeCompat::class, false)) {
+    $hydrateAllDataReturnType = (new \ReflectionMethod(AbstractHydrator::class, 'hydrateAllData'))->getReturnType();
+    $returnTypeDeclaration = $hydrateAllDataReturnType !== null ? ': ' . $hydrateAllDataReturnType : '';
+
+    eval(<<<PHP
+namespace Ovrflo\JitHydrator;
+
+trait JitObjectHydratorReturnTypeCompat
+{
+    protected function hydrateAllData(){$returnTypeDeclaration}
+    {
+        return \$this->doHydrateAllData();
+    }
+}
+PHP
+    );
+
+    unset($hydrateAllDataReturnType, $returnTypeDeclaration);
+}
+
 /**
  * @author Catalin Dan <dancatalin18@gmail.com>
  */
 class JitObjectHydrator extends AbstractHydrator
 {
+    use JitObjectHydratorReturnTypeCompat;
+
     private static ?string $proxyDir = null;
 
     public const HINT_JIT_FLAGS = 'jit_flags';
@@ -74,7 +110,7 @@ class JitObjectHydrator extends AbstractHydrator
         }
     }
 
-    protected function hydrateAllData(): mixed
+    protected function doHydrateAllData()
     {
         if ($this->_rsm) {
             $this->stmt = $this->_stmt;
