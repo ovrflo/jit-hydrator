@@ -74,6 +74,22 @@ One deliberate limitation: if you combine `PARTIAL` with an explicit `Query::HIN
 same alias, the refreshed ghost is left lazy rather than force-marked as fully initialized, so it
 will still (correctly) reload on next access to an unselected field rather than risk stranding it.
 
+# INDEX BY
+
+DQL's `INDEX BY` (`$queryBuilder->indexBy($alias, $field)`, or the raw `INDEX BY` DQL keyword) is
+supported for:
+
+- The root alias, keying the top-level result array/collection by that field instead of returning
+  a plain 0-based list - e.g. `SELECT t FROM Torrent t WHERE t.id IN (:ids)` with `indexBy('t',
+  't.id')` returns `[$id => $torrent, ...]` rather than `[0 => $torrent, ...]`.
+- A joined to-many association alias, keying that association's collection instead of appending to
+  it - e.g. `SELECT a, b FROM Author a JOIN a.books b INDEX BY b.id` keys `$author->getBooks()` by
+  book id.
+
+`INDEX BY` on a mixed entity+scalar result set, or across a multi-root (`SELECT a, b FROM ...`
+without treating `b` as `a`'s association) result set, isn't implemented - `getResult('jit')` throws
+a `LogicException` in those cases instead of silently falling back to a plain, unindexed list.
+
 # Status
 While this is currently running in production on a relatively small app, I wouldn't dare calling it production-ready. I'm sure there are a few bugs to squash in there. In my limited testing it worked, significantly lowering response times and CPU usage.
 Less CPU time means happier users and also lower power bills. Sure, we don't tend to think about power bills, but if you're running a huge infrastructure that heavily uses Doctrine ORM, it might actually make a difference. If power usage isn't a concern, than at least consider having more CPU headroom for your codebase.

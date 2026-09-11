@@ -680,14 +680,24 @@ class HydratorGenerator
                         case ClassMetadata::ONE_TO_MANY:
                         case ClassMetadata::MANY_TO_MANY:
                             if (isset($joinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeIf('$entity_' . $joinedRelations[$alias][$name]);
+                                $childAlias = $joinedRelations[$alias][$name];
+                                $rowHydrateMethod->writeIf('$entity_' . $childAlias);
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
-                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $joinedRelations[$alias][$name] . ');');
+                                if (isset($this->rsm->indexByMap[$childAlias])) {
+                                    $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateSet($data[' . var_export($this->rsm->indexByMap[$childAlias], true) . '], $entity_' . $childAlias . ');');
+                                } else {
+                                    $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $childAlias . ');');
+                                }
                                 $rowHydrateMethod->writeEndif();
                             } elseif (isset($inverseJoinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeIf('$entity_' . $inverseJoinedRelations[$alias][$name]);
+                                $childAlias = $inverseJoinedRelations[$alias][$name];
+                                $rowHydrateMethod->writeIf('$entity_' . $childAlias);
                                 $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . ' = ' . $this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->getValue($entity_' . $alias . ');');
-                                $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $inverseJoinedRelations[$alias][$name] . ');');
+                                if (isset($this->rsm->indexByMap[$childAlias])) {
+                                    $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateSet($data[' . var_export($this->rsm->indexByMap[$childAlias], true) . '], $entity_' . $childAlias . ');');
+                                } else {
+                                    $rowHydrateMethod->writeln('$collection_' . $alias . '_' . $name . '->hydrateAdd($entity_' . $childAlias . ');');
+                                }
                                 $rowHydrateMethod->writeEndif();
                             }
                             break;
@@ -720,10 +730,22 @@ class HydratorGenerator
 
         if (\count($rootEntities) === 1) {
             if (!count($this->rsm->scalarMappings)) {
-                $rowHydrateMethod->writeIf('$new_entity_' . $rootEntities[0]);
-                $rowHydrateMethod->writeln('$result[] = $entity_' . $rootEntities[0] . ';');
+                $rootAlias = $rootEntities[0];
+                $rowHydrateMethod->writeIf('$new_entity_' . $rootAlias);
+                if (isset($this->rsm->indexByMap[$rootAlias])) {
+                    $rowHydrateMethod->writeln('$result[$data[' . var_export($this->rsm->indexByMap[$rootAlias], true) . ']] = $entity_' . $rootAlias . ';');
+                } else {
+                    $rowHydrateMethod->writeln('$result[] = $entity_' . $rootAlias . ';');
+                }
                 $rowHydrateMethod->writeEndif();
             } else {
+                // INDEX BY on a mixed (entity + scalar) result set would need to key off
+                // whichever row last supplied that identity, same as ObjectHydrator - not
+                // implemented here, so fail loudly instead of silently returning a plain list.
+                if (isset($this->rsm->indexByMap[$rootEntities[0]]) || isset($this->rsm->indexByMap['scalars'])) {
+                    throw new \LogicException('JitObjectHydrator does not support INDEX BY on a mixed entity/scalar result set.');
+                }
+
                 $rowHydrateMethod->writeln('$result[] = [')->indent();
                 $rowHydrateMethod->writeln('$entity_' . $rootEntities[0] . ',');
 
@@ -734,6 +756,12 @@ class HydratorGenerator
                 $rowHydrateMethod->outdent()->writeln('];');
             }
         } else {
+            foreach (array_keys($aliasColumnMap) as $alias) {
+                if (isset($this->rsm->indexByMap[$alias])) {
+                    throw new \LogicException('JitObjectHydrator does not support INDEX BY on a multi-root result set.');
+                }
+            }
+
             $rowHydrateMethod->writeln('$result[] = [')->indent();
             foreach ($aliasColumnMap as $alias => $fields) {
                 $rowHydrateMethod->writeln(var_export($alias, true) . ' => $entity_' . $alias . ',');

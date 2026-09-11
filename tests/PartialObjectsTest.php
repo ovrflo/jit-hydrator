@@ -31,8 +31,17 @@ class PartialObjectsTest extends TestCase
         $this->queryCounter = new QueryCounter();
         $this->em = EntityManagerFactory::create($this->queryCounter);
 
-        if (!$this->em->getConfiguration()->isNativeLazyObjectsEnabled()) {
-            self::markTestSkipped('Requires native lazy objects.');
+        // Matches HydratorGenerator's own $supportsPartialLazyGhosts fingerprint: native lazy
+        // objects alone (available since ORM 3.6) aren't enough - PARTIAL-as-lazy-ghost support
+        // needs the GH-12210 properties that only landed in 3.7. isNativeLazyObjectsEnabled()
+        // alone returns true on 3.6 too, which would let these tests run there and fail against
+        // the (correct, expected) old PARTIAL behavior instead of being skipped.
+        if (
+            !$this->em->getConfiguration()->isNativeLazyObjectsEnabled()
+            || !property_exists(\Doctrine\ORM\Query\ResultSetMapping::class, 'partialAliases')
+            || !property_exists(\Doctrine\ORM\UnitOfWork::class, 'partialObjectLoadedFields')
+        ) {
+            self::markTestSkipped('Requires native lazy objects with PARTIAL support (Doctrine ORM 3.7+, GH-12210).');
         }
     }
 

@@ -18,7 +18,12 @@ final class EntityManagerFactory
             true
         );
         $config->addCustomHydrationMode('jit', JitObjectHydrator::class);
-        $config->enableNativeLazyObjects(true);
+        // Native lazy objects (and PARTIAL-as-lazy-ghost support) only exist from
+        // Doctrine ORM 3.7 on PHP 8.4+; older/other combinations run the tests
+        // against the classic (non-lazy) PARTIAL/proxy behavior instead.
+        if (method_exists($config, 'enableNativeLazyObjects')) {
+            $config->enableNativeLazyObjects(true);
+        }
 
         if ($queryCounter !== null) {
             $config->setMiddlewares([new Middleware($queryCounter)]);
