@@ -460,6 +460,13 @@ class HydratorGenerator
                                             ->writeEndif()
                                         ;
                                     }
+                                    // A selected-but-null FK column must still be explicitly written as null,
+                                    // not merely skipped: $result may be a native lazy ghost (PARTIAL query),
+                                    // and leaving a selected association property untouched leaves it genuinely
+                                    // uninitialized at the PHP engine level, which triggers a full reload of
+                                    // $result itself the next time anything reads that property.
+                                    $hydrateMethod->writeElse();
+                                    $hydrateMethod->writeln($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($result, null);');
                                     $hydrateMethod->writeEndif();
                                 }
                             }
@@ -672,8 +679,19 @@ class HydratorGenerator
                         case ClassMetadata::MANY_TO_ONE:
                         case ClassMetadata::ONE_TO_ONE:
                             if (isset($joinedRelations[$alias][$name])) {
-                                $rowHydrateMethod->writeIf('$new_entity_' . $alias . ' && $entity_' . $joinedRelations[$alias][$name]);
+                                // A LEFT JOINed to-one association with no matching row ($entity_<childAlias>
+                                // === null) must still be explicitly set to null here, not merely skipped:
+                                // $entity_<alias> may be a native lazy ghost (PARTIAL query), and leaving a
+                                // selected-but-unmatched association property untouched leaves it genuinely
+                                // uninitialized at the PHP engine level, which triggers a full reload of
+                                // $entity_<alias> itself the next time anything reads that property - even
+                                // though the join was in fact resolved (to nothing).
+                                $rowHydrateMethod->writeIf('$new_entity_' . $alias);
+                                $rowHydrateMethod->writeIf('$entity_' . $joinedRelations[$alias][$name]);
                                 $rowHydrateMethod->writeln(sprintf($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($entity_' . $alias . ', $entity_' . $joinedRelations[$alias][$name] . ');'));
+                                $rowHydrateMethod->writeElse();
+                                $rowHydrateMethod->writeln(sprintf($this->getMetadataPropertyName($classMetadata->name) . '->'.$propertyAccessors.'[' . var_export($name, true) . ']->setValue($entity_' . $alias . ', null);'));
+                                $rowHydrateMethod->writeEndif();
                                 $rowHydrateMethod->writeEndif();
                             }
                             break;
