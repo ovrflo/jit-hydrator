@@ -148,16 +148,20 @@ class JitObjectHydrator extends AbstractHydrator
         if (!class_exists($fqcn, false)) {
             $cacheFilename = $this->cacheDir . '/' . $className . '.php';
             if ($this->debug || !$this->cacheDir || !file_exists($cacheFilename)) {
-                $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->rsm, $this->stmt, $this->hints, $this->em, false, $this->hints[self::HINT_JIT_FLAGS] ?? []);
-                $classString = $hydratorGenerator->dump($this->cacheDir === null);
+                $classString = $this->generate($className, $namespace, $this->cacheDir === null);
                 if ($this->cacheDir) {
-                    file_put_contents($cacheFilename, $classString);
+                    self::write($cacheFilename, $classString);
                     require_once $cacheFilename;
                 } else {
                     eval(substr($classString, 5));
                 }
             } else {
                 require_once $cacheFilename;
+            }
+            // Another request's file could still be incomplete, or compiled before it was (an opcode cache that
+            // doesn't check timestamps keeps it): the class is then made in memory for this request.
+            if (!class_exists($fqcn, false)) {
+                eval(substr($this->generate($className, $namespace, true), 5));
             }
         }
 
@@ -169,6 +173,33 @@ class JitObjectHydrator extends AbstractHydrator
         }
 
         return $result;
+    }
+
+    private function generate(string $className, string $namespace, bool $forEval): string
+    {
+        $hydratorGenerator = new HydratorGenerator($className, $namespace, $this->rsm, $this->stmt, $this->hints, $this->em, false, $this->hints[self::HINT_JIT_FLAGS] ?? []);
+
+        return $hydratorGenerator->dump($forEval);
+    }
+
+    /**
+     * Writes a generated class where concurrent requests may read it: to a temporary file renamed into place (a
+     * reader sees the whole file or none), then drops any compiled copy of an earlier one from the opcode cache.
+     */
+    private static function write(string $filename, string $contents): void
+    {
+        $temporary = tempnam(\dirname($filename), basename($filename, '.php') . '.');
+        if (false === $temporary || false === file_put_contents($temporary, $contents)) {
+            throw new \RuntimeException(sprintf('The hydrator "%s" could not be written.', $filename));
+        }
+        @chmod($temporary, 0666 & ~umask());
+        if (!rename($temporary, $filename)) {
+            @unlink($temporary);
+            throw new \RuntimeException(sprintf('The hydrator "%s" could not be moved into place.', $filename));
+        }
+        if (\function_exists('opcache_invalidate')) {
+            @opcache_invalidate($filename, true);
+        }
     }
 
     protected function hydrateRowData(array $data, array &$result): void
