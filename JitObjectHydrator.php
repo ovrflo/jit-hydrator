@@ -96,10 +96,11 @@ class JitObjectHydrator extends AbstractHydrator
     public function __construct(EntityManagerInterface $em, bool $debug = false)
     {
         parent::__construct($em);
-        $proxyDir = $em->getConfiguration()->getProxyDir();
+        // The ORM's proxy dir only as the fallback: Configuration::getProxyDir() is deprecated (ORM 3.7, gone in 4), and
+        // a hydrator is built for every query, so reading it each time logged a deprecation per query.
         if (self::$proxyDir) {
             $this->cacheDir = self::$proxyDir;
-        } elseif ($proxyDir) {
+        } elseif ($proxyDir = $em->getConfiguration()->getProxyDir()) {
             $this->cacheDir = $proxyDir . '/../JitHydrator';
         }
         $this->debug = $debug;
